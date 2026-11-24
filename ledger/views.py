@@ -17,6 +17,7 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from .domain import DataError, calculate, decimal, summarize, review_issues, invoice_message
 from .models import Audit, Batch, LoginAttempt
 from .sheets import Sheets
+from .jungpan import tracking_url
 
 
 def payload(request):
@@ -41,7 +42,8 @@ def serialized(batch, detail=False):
             o = {k:v for k,v in order.items() if k in {"id","customer","jungpan_order","shop_orders","trackings","mode","amount","memo","opp","boxes","extra_hours","extra_amount","reason","free_hours_override","reviewed"}}
             issues = review_issues(order, batch.rules)
             c=calculate(order,batch.rules)
-            o.update(review_issues=issues,calculation=c)
+            o.update(review_issues=issues,calculation=c,
+                source_links=[{"tracking":t,"url":tracking_url(t)} for t in order["trackings"] if str(t).strip()])
             if issues and not order["reviewed"]:
                 decisions.append(o)
             elif c["ready"] and decimal(c["total"]) > 0:

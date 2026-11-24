@@ -3,6 +3,7 @@ import re
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from urllib.parse import urlencode
 
 import httpx
 from bs4 import BeautifulSoup
@@ -10,6 +11,11 @@ from .domain import DataError
 
 BASE = "https://www.jungpan.com"
 LIST = "/Admin/1688/Order_L.asp?gMnu1=123&gMnu2=12302"
+
+
+def tracking_url(tracking):
+    return BASE + LIST + "&" + urlencode({"shChTrkNo":str(tracking).strip(),"shBeginDay":"2000-01-01",
+        "shEndDay":datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat(),"shStatusCd":"","shSendType":""})
 
 
 def soup(html):

@@ -2,11 +2,12 @@ import json
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
+from urllib.parse import urlparse, parse_qs
 
 from django.contrib.auth import get_user_model
 from django.test import Client, SimpleTestCase, TestCase
 from .domain import DataError, assemble, calculate, decimal, first_work, packaging, summarize, review_issues, source_fingerprint, invoice_message
-from .jungpan import parse_child, parse_parent, parse_products
+from .jungpan import parse_child, parse_parent, parse_products, tracking_url
 from .models import Batch
 from .sheets import Sheets, build_rows, cell, formula_rows, Formula, BILL, APPROVAL
 
@@ -177,6 +178,16 @@ class DomainTests(SimpleTestCase):
 
 
 class ParserTests(SimpleTestCase):
+    def test_tracking_link_uses_the_real_search_field_and_escapes_query_values(self):
+        for tracking in ("753560928","AB-1234","123&shOrdNo=other"):
+            with self.subTest(tracking=tracking):
+                url=urlparse(tracking_url(tracking));query=parse_qs(url.query,keep_blank_values=True)
+                self.assertEqual(url.netloc,"www.jungpan.com")
+                self.assertEqual(url.path,"/Admin/1688/Order_L.asp")
+                self.assertEqual(query["shChTrkNo"],[tracking])
+                self.assertEqual(query["shBeginDay"],["2000-01-01"])
+                self.assertNotIn("shOrdNo",query)
+
     def test_product_id_and_long_shop_order(self):
         html = '''<table><tr><th>번호</th></tr><tr><td>20530</td><td></td><td>Test item</td>
         <td><input name="frgValue" value="79048918464133"><div><input name="sOrdValue" value="3317196504266012180"><input name="ORD_SEQ_P" value="18053"></div></td>
@@ -215,6 +226,15 @@ class WorkflowTests(TestCase):
     def test_anonymous_has_no_access_to_financial_data(self):
         self.client.logout()
         self.assertEqual(self.client.get("/api/batches/").status_code, 302)
+
+    def test_source_links_preserve_every_tracking_on_the_order(self):
+        self.batch.orders[0]["trackings"]=["753560928","79049245784592"]
+        self.batch.save()
+        data=self.client.get(f"/api/batches/{self.batch.id}/").json()
+        links=data["decisions"][0]["source_links"]
+        self.assertEqual([l["tracking"] for l in links],["753560928","79049245784592"])
+        for link in links:
+            self.assertEqual(parse_qs(urlparse(link["url"]).query)["shChTrkNo"],[link["tracking"]])
 
     def test_existing_draft_reclassifies_without_overwriting_source_or_decisions(self):
         o=self.batch.orders[0]
