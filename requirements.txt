@@ -1,0 +1,7 @@
+Django==5.2.19
+httpx==0.28.1
+beautifulsoup4==4.15.0
+psycopg[binary]==3.3.9
+google-auth[requests]==2.63.1
+gunicorn==23.0.0
+whitenoise==6.12.0
