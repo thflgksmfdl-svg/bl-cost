@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 def process(batch):
     if batch.state == "fetching":
         def checkpoint(source, done, total):
-            Batch.objects.filter(pk=batch.pk).update(source=source, progress=done, total=total, updated_at=timezone.now())
+            if done % 5 == 0 or done == total:
+                Batch.objects.filter(pk=batch.pk).update(source=source, progress=done, total=total, updated_at=timezone.now())
         with Jungpan() as jp:
             source = jp.collect(batch.bl, checkpoint, cached=batch.source)
         orders = assemble(source)
@@ -56,11 +57,12 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         if connection.vendor == "postgresql":
-            with connection.cursor() as c:
-                c.execute("SELECT pg_try_advisory_lock(734082914602)")
-                if not c.fetchone()[0]:
-                    self.stdout.write("다른 작업 처리기가 실행 중입니다.")
-                    return
+            while True:
+                with connection.cursor() as c:
+                    c.execute("SELECT pg_try_advisory_lock(734082914602)")
+                    if c.fetchone()[0]:
+                        break
+                time.sleep(2)
         Batch.objects.filter(state="fetching").update(state="queued")
         Batch.objects.filter(state="saving").update(state="approved")
         while True:

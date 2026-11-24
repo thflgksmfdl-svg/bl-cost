@@ -1,7 +1,7 @@
 import json
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from django.contrib.auth import get_user_model
 from django.test import Client, SimpleTestCase, TestCase
@@ -195,6 +195,18 @@ class WorkflowTests(TestCase):
         client = Client(enforce_csrf_checks=True, HTTP_X_FORWARDED_PROTO="https")
         client.force_login(self.user)
         self.assertEqual(client.post("/api/batches/", {"bl": "202611240025"}).status_code, 403)
+
+    def test_new_deploy_waits_for_previous_worker_instead_of_exiting(self):
+        from ledger.management.commands.runworker import Command
+        self.batch.state = "queued"
+        self.batch.save()
+        db = MagicMock(vendor="postgresql")
+        db.cursor.return_value.__enter__.return_value.fetchone.side_effect = [(False,), (True,)]
+        with patch("ledger.management.commands.runworker.connection", db), patch("ledger.management.commands.runworker.time.sleep") as sleep, patch("ledger.management.commands.runworker.process", side_effect=KeyboardInterrupt) as process:
+            with self.assertRaises(KeyboardInterrupt):
+                Command().handle()
+        sleep.assert_called_once_with(2)
+        process.assert_called_once()
 
     def test_ambiguous_adjustment_requires_reason(self):
         self.assertEqual(self.post("edit", order_id="17974", changes={"extra_hours": "1"}).status_code, 400)
