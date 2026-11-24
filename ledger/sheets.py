@@ -16,6 +16,11 @@ RAW = "주문 데이터"
 COST = "원가 정산"
 BILL = "청구 입력(내가 입력)"
 APPROVAL = "시스템 승인기준"
+HEADER_HASHES = {
+    RAW: "272d6e4ee9bb2dcdff05a220a799aa97be5967cb0ca8b8faf27558d0076f5bb3",
+    COST: "e506543b0191d60f616d83babe420bd2340cbe06703e5b23741622e928ddadda",
+    BILL: "1ee2c905bb48f947301ea240b93ccd478807bdb7377513a172d677f2f2aa86df",
+}
 APPROVAL_HEADERS = ["시스템 고유키", "BL", "중판 주문", "승인 환율", "시간당 청구액(원)", "부가세율", "무료 박스",
     "박스 청구단가(CNY)", "시간당 원가(CNY)", "opp 원가(CNY)", "박스 원가(CNY)", "바코드 원가(원)",
     "스티커 원가(CNY)", "재봉 원가(CNY)", "CBM 원가(CNY)", "승인 무료시간", "추가 청구시간", "별도 추가금액(원)",
@@ -253,7 +258,11 @@ class Sheets:
             approval_id = next(i for i in range(1619030188, 1619030288) if i not in used)
             props[APPROVAL] = {"sheetId": approval_id, "gridProperties": {"rowCount": 1000}}
         columns = self.values([f"'{name}'!B{first}:B{min(15000, props[name]['gridProperties']['rowCount'])}"
-                              for name, first in ((RAW,6),(COST,4),(BILL,4))] + [f"'{RAW}'!A5:BF5"])
+                              for name, first in ((RAW,6),(COST,4),(BILL,4))] +
+                              [f"'{RAW}'!A5:BF5", f"'{COST}'!A3:AG3", f"'{BILL}'!A3:AD3"])
+        for name, header, width in zip((RAW,COST,BILL), columns[3:], (57,33,30)):
+            if not header or fingerprint(header[0][:width]) != HEADER_HASHES[name]:
+                raise DataError(f"{name}의 열 구조가 변경되었습니다. 잘못된 열에 쓰지 않도록 저장을 중단했습니다.")
         headers = columns[3][0]
         if len(headers) < 57 or headers[1] != "묶음 주문번호" or headers[49] != "바코드 수량":
             raise DataError("주문 데이터의 열 구조가 변경되었습니다. 저장하지 않았습니다.")
@@ -264,9 +273,11 @@ class Sheets:
             if any(r and str(r[0]) == batch.bl for r in rows):
                 raise DataError("이 BL이 기존 공유시트에 있습니다. 중복 저장을 차단했습니다. 기존 자료 보정은 원본 대조 후 별도로 진행해 주세요.")
             starts[name] = max((i + first + 1 for i, r in enumerate(rows) if r and r[0] != ""), default=first)
-        approval_keys = [] if create_approval else self.values([f"'{APPROVAL}'!A:A"])[0]
-        if approval_keys and approval_keys[0] != [APPROVAL_HEADERS[0]]:
-            raise DataError("시스템 승인기준 탭의 열 구조를 확인해 주세요.")
+        approval_keys = []
+        if not create_approval:
+            approval_keys, approval_headers = self.values([f"'{APPROVAL}'!A:A", f"'{APPROVAL}'!A1:AC1"])
+            if not approval_headers or approval_headers[0] != APPROVAL_HEADERS:
+                raise DataError("시스템 승인기준 탭의 열 구조를 확인해 주세요.")
         starts[APPROVAL] = max(2, len(approval_keys) + 1)
         data = build_rows(batch)
         targets = {name: {"start": starts[name], "count": len(rows), "sheet_id": props[name]["sheetId"],

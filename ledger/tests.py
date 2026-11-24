@@ -27,6 +27,15 @@ def source():
 
 
 class DomainTests(SimpleTestCase):
+    def test_unknown_sheet_structure_stops_before_writing(self):
+        client = object.__new__(Sheets)
+        meta = {"sheets": [{"properties": {"title": n, "sheetId": i, "gridProperties": {"rowCount":15000}}}
+                           for i,n in enumerate((RAW,COST,BILL))]}
+        with patch.object(client,"metadata",return_value=meta), patch.object(client,"values",return_value=[[],[],[],[],[],[]]), patch.object(client,"call") as call:
+            with self.assertRaisesMessage(DataError,"열 구조"):
+                client.prepare(SimpleNamespace(id="test",bl="202601010001"))
+        call.assert_not_called()
+
     def test_top_entry_per_type_and_tracking_deduplication(self):
         orders = assemble(source())
         self.assertEqual(orders[0]["work"], {"인쇄스티커": "52", "작업시간": "2"})
