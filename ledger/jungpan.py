@@ -90,7 +90,7 @@ def parse_child(html, expected):
     selected = box.find("option", selected=True) or box.find("option")
     return {**expected, "amount": prices[-1], "shipping": shipping[0],
         "recipient": " ".join(shipping[1:]), "member": cells[3].get_text(" ", strip=True),
-        "ware_err": memo("WareErrMemo"), "manager_memo": memo("MgrMemo"),
+        "ware_err": memo("WareErrMemo"),
         "admin_memo": memo("AdmMemo"), "box_field": selected.get("value", "0") if selected else "0"}
 
 
@@ -141,7 +141,8 @@ class Jungpan:
         seq, specs = parse_parent(self.search(bl), bl)
         products = parse_products(self.request("POST", "/Admin/1688/Order_Pro_V_Data.asp", data={"ORD_SEQ": seq}))
         valid = {c["seq"]: c for c in specs}
-        children = {c["seq"]: c for c in (cached or {}).get("children", []) if c["seq"] in valid}
+        children = {c["seq"]: {k:v for k,v in c.items() if k != "manager_memo"}
+                    for c in (cached or {}).get("children", []) if c["seq"] in valid}
         for spec in specs:
             if spec["seq"] not in children:
                 children[spec["seq"]] = parse_child(self.search(spec["number"]), spec)

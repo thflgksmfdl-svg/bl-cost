@@ -4,7 +4,7 @@ from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 from django.utils import timezone
 
-from ledger.domain import DataError, ReviewRequired, assemble, fingerprint, summarize
+from ledger.domain import DataError, ReviewRequired, assemble, source_fingerprint, summarize
 from ledger.jungpan import Jungpan
 from ledger.models import Audit, Batch
 from ledger.sheets import Sheets
@@ -28,7 +28,7 @@ def process(batch):
         with transaction.atomic():
             batch = Batch.objects.select_for_update().get(pk=batch.pk)
             batch.source, batch.orders, batch.rules = source, orders, rules
-            batch.source_hash, batch.summary = fingerprint(source), summarize(orders, rules)
+            batch.source_hash, batch.summary = source_fingerprint(source), summarize(orders, rules)
             batch.state, batch.error = "review", error
             batch.revision += 1
             batch.save()
@@ -39,7 +39,7 @@ def process(batch):
             with Jungpan() as jp:
                 source = jp.collect(batch.bl, lambda data, done, total: Batch.objects.filter(pk=batch.pk).update(
                     progress=done, total=total, updated_at=timezone.now()))
-            if fingerprint(source) != batch.source_hash:
+            if source_fingerprint(source) != source_fingerprint(batch.source):
                 raise DataError("승인 후 중판 원본이 변경되었습니다. 원본을 다시 조회하고 검토해 주세요.")
             if client.rules(batch.rules["month"])["version"] != batch.rules["version"]:
                 raise ReviewRequired("승인 후 청구규칙이 변경되었습니다. 규칙을 다시 불러와 검토해 주세요.")

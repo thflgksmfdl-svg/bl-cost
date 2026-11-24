@@ -2,7 +2,6 @@ import json
 import os
 import re
 from decimal import Decimal
-from urllib.parse import quote
 
 from django.conf import settings
 from google.auth.transport.requests import AuthorizedSession
@@ -10,17 +9,11 @@ from google.oauth2.service_account import Credentials
 from google.auth.exceptions import GoogleAuthError
 from requests.exceptions import RequestException
 
-from .domain import DataError, ReviewRequired, calculate, decimal, fingerprint
+from .domain import DataError, ReviewRequired, calculate, decimal, fingerprint, invoice_message, review_issues
 
-RAW = "주문 데이터"
-COST = "원가 정산"
 BILL = "청구 입력(내가 입력)"
 APPROVAL = "시스템 승인기준"
-HEADER_HASHES = {
-    RAW: "272d6e4ee9bb2dcdff05a220a799aa97be5967cb0ca8b8faf27558d0076f5bb3",
-    COST: "e506543b0191d60f616d83babe420bd2340cbe06703e5b23741622e928ddadda",
-    BILL: "1ee2c905bb48f947301ea240b93ccd478807bdb7377513a172d677f2f2aa86df",
-}
+BILL_HEADER_HASH = "1ee2c905bb48f947301ea240b93ccd478807bdb7377513a172d677f2f2aa86df"
 APPROVAL_HEADERS = ["시스템 고유키", "BL", "중판 주문", "승인 환율", "시간당 청구액(원)", "부가세율", "무료 박스",
     "박스 청구단가(CNY)", "시간당 원가(CNY)", "opp 원가(CNY)", "박스 원가(CNY)", "바코드 원가(원)",
     "스티커 원가(CNY)", "재봉 원가(CNY)", "CBM 원가(CNY)", "승인 무료시간", "추가 청구시간", "별도 추가금액(원)",
@@ -46,146 +39,56 @@ def cell(value):
     return {"userEnteredValue": {"stringValue": str(value)}}
 
 
-def note(order, batch):
-    return (f"중판 주문 {order['jungpan_order']} / 시스템 승인 {batch.id}\n"
-            f"추가 청구시간 {order['extra_hours']}시간 / 별도 추가금액 {order['extra_amount']}원(VAT 포함)\n"
-            f"사유: {order['reason']}\n{order['memo']}")
-
-
 def build_rows(batch):
-    raw, cost, bills = [], [], []
-    orders = {o["id"]: o for o in batch.orders}
-    seen = set()
-    month = f"{batch.bl[:4]}-{batch.bl[4:6]}"
+    bills, approvals = [], []
     rules = batch.rules
-    fx = decimal(rules["exchange"])
-    for index, p in enumerate(batch.source["products"]):
-        o = orders[p["child_seq"]]
+    for o in batch.orders:
+        if review_issues(o, rules) and not o["reviewed"]:
+            raise DataError("추가 비용 결정을 먼저 완료해 주세요.")
         c = calculate(o, rules)
         if not c["ready"]:
             raise DataError("확정할 수 없는 계산이 남아 있습니다.")
-        first = o["id"] not in seen
-        seen.add(o["id"])
-        w = o["work"] if first else {}
-        hours = decimal(w.get("작업시간", 0))
-        opp = decimal(o.get("opp") or 0) if first else Decimal(0)
-        boxes = decimal(o.get("boxes") or 0) if first else Decimal(0)
-        cbm = decimal(o.get("cbm", "0")) if first else Decimal(0)
+        if not decimal(c["total"]):
+            continue
+        fx, vat = decimal(rules["exchange"]), decimal(rules["vat"])
+        hours = decimal(c["actual_hours"])
+        charged = (Decimal(0) if o["waive_work"] else decimal(c["charge_hours"])) + decimal(o["extra_hours"])
+        gross = decimal(c["work_charge"]) + decimal(c["extra_time_charge"])
+        supply = gross / (1 + vat)
+        boxes, cbm = decimal(o.get("boxes") or 0), decimal(o.get("cbm") or 0)
+        total = decimal(c["total"])
+        note = f"중판 주문 {o['jungpan_order']} / 시스템 승인 {batch.id}\n사유: {o['reason']}\n입고오류메시지: {o['memo']}"
+        bills.append([f"{batch.bl[:4]}-{batch.bl[4:6]}", batch.bl, o["customer"], ", ".join(o["shop_orders"]), ", ".join(o["trackings"]),
+            o["mode"], decimal(o["amount"]), hours, decimal(c["free_hours"]), charged, supply, gross-supply, gross,
+            boxes, decimal(rules["free_boxes"]), decimal(c["box_excess"]), decimal(c["box_excess"])*decimal(rules["box_cny"]),
+            fx, decimal(c["box_charge"]), cbm, max(Decimal(0), cbm-3), decimal(c["cbm_charge"]), decimal(c["base"]),
+            "직접입력", total, total, "", "", invoice_message(o, rules), note])
         costs = rules["costs"]
-        work_cost = hours * decimal(costs["hourly_cny"]) * fx
-        opp_cost = opp * decimal(costs["opp_cny"]) * fx
-        box_cost = boxes * decimal(costs["box_cny"]) * fx
-        barcode = decimal(w.get("바코드", 0))
-        sticker = decimal(w.get("스티커", 0))
-        sewing = decimal(w.get("재봉", 0))
-        barcode_cost = barcode * decimal(costs["barcode_krw"])
-        sticker_cost = sticker * decimal(costs["sticker_cny"]) * fx
-        sewing_cost = sewing * decimal(costs["sewing_cny"]) * fx
-        cbm_cost = cbm * decimal(costs["cbm_cny"]) * fx
-        actual_cost = work_cost + opp_cost + box_cost + barcode_cost + sticker_cost + sewing_cost + cbm_cost
-        total = decimal(c["total"]) if first else Decimal(0)
-        memo = note(o, batch)
-        message = (f"주문번호 {', '.join(o['shop_orders'])} 추가 비용 안내\n"
-                   f"실제 작업시간 {c['actual_hours']}시간 / 무료 {c['free_hours']}시간\n"
-                   f"박스 {o.get('boxes') or 0}개 / 초과 {c['box_excess']}개\n"
-                   f"추가 청구시간 {o['extra_hours']}시간 / 별도 추가금액 {o['extra_amount']}원\n"
-                   f"최종 청구금액(VAT 포함): {total:,.0f}원") if first and total else ""
-        row = [None] * 58
-        row[:17] = [month, batch.bl, o["customer"], p["order"], p["tracking"], o["mode"],
-                    decimal(o["amount"]), cbm, hours, opp, boxes, 0, 0, 0, 0, 0, memo]
-        row[17:28] = [fx, work_cost, opp_cost, box_cost, 0, 0, actual_cost,
-                       decimal(c["free_hours"]) if first else 0,
-                       decimal(c["charge_hours"]) + decimal(o["extra_hours"]) if first else 0,
-                       decimal(c["work_charge"]) + decimal(c["extra_time_charge"]) if first else 0,
-                       decimal(c["cbm_charge"]) if first else 0]
-        row[28:41] = [0, "자동", 0, 0, "자동", 0,
-                        decimal(c["box_charge"]) if first else 0, 0, 0,
-                        decimal(c["base"]) if first else 0, "직접입력", total, total]
-        row[41:48] = [message, total - actual_cost,
-                       (total - actual_cost) / total if total else 0, actual_cost / total if total else 0,
-                       decimal(w.get("인쇄스티커", 0)), f"OPP {opp}개 / 박스 {boxes}개" if first else "", 0]
-        row[48:] = [p["name"], barcode, sticker, sewing, decimal(w.get("벌크작업", 0)),
-                    decimal(w.get("도장", 0)), p["work"], p["status"], f"중판 상품 {p['unit']}", f"{batch.id}:{p['unit']}"]
-        raw.append(row)
-        cost.append([month, batch.bl, p["order"], p["tracking"], o["customer"], decimal(o["amount"]), fx,
-                     cbm, decimal(costs["cbm_cny"]), cbm_cost, hours, work_cost, barcode, barcode_cost,
-                     sticker, sticker_cost, sewing, sewing_cost, decimal(w.get("벌크작업", 0)), 0,
-                     decimal(w.get("도장", 0)), 0, opp, opp_cost, boxes, box_cost, 0, 0, 0,
-                     actual_cost, p["work"], memo, "계산 완료"])
-        if first and (hours or boxes or opp or total or decimal(o["extra_hours"]) or decimal(o["extra_amount"])):
-            work_gross = decimal(c["work_charge"]) + decimal(c["extra_time_charge"])
-            supply = work_gross / (1 + decimal(rules["vat"]))
-            bills.append([month, batch.bl, o["customer"], ", ".join(o["shop_orders"]), ", ".join(o["trackings"]),
-                o["mode"], decimal(o["amount"]), hours, decimal(c["free_hours"]),
-                decimal(c["charge_hours"]) + decimal(o["extra_hours"]), supply, work_gross - supply, work_gross,
-                boxes, decimal(rules["free_boxes"]), decimal(c["box_excess"]),
-                decimal(c["box_excess"]) * decimal(rules["box_cny"]), fx, decimal(c["box_charge"]), cbm,
-                max(Decimal(0), cbm - 3), decimal(c["cbm_charge"]), decimal(c["base"]),
-                "직접입력", total, total, "", "", message, memo])
-    approvals = []
-    for o in batch.orders:
-        c = calculate(o, rules)
-        approvals.append([f"{batch.id}:{o['id']}", batch.bl, o["jungpan_order"], fx, decimal(rules["hourly"]),
-            decimal(rules["vat"]), decimal(rules["free_boxes"]), decimal(rules["box_cny"]), decimal(costs["hourly_cny"]),
-            decimal(costs["opp_cny"]), decimal(costs["box_cny"]), decimal(costs["barcode_krw"]), decimal(costs["sticker_cny"]),
-            decimal(costs["sewing_cny"]), decimal(costs["cbm_cny"]), decimal(c["free_hours"]), decimal(o["extra_hours"]),
-            decimal(o["extra_amount"]), int(o["waive_work"]), int(o["waive_total"]),
-            decimal(o["manual_total"]) if o["manual_total"] is not None else None, 3, 10000, o["reason"], rules["version"],
-            "https://www.jungpan.com/Admin/1688/Order_L.asp?gMnu1=123&gMnu2=12302",
-            f"shOrdNo={o['jungpan_order']}; BL={batch.bl}; 상품별 최신 작업기록을 하위주문·트래킹별 중복 제거",
+        approvals.append([f"{batch.id}:{o['id']}", batch.bl, o["jungpan_order"], fx, decimal(rules["hourly"]), vat,
+            decimal(rules["free_boxes"]), decimal(rules["box_cny"]), decimal(costs["hourly_cny"]), decimal(costs["opp_cny"]),
+            decimal(costs["box_cny"]), decimal(costs["barcode_krw"]), decimal(costs["sticker_cny"]), decimal(costs["sewing_cny"]),
+            decimal(costs["cbm_cny"]), decimal(c["free_hours"]), decimal(o["extra_hours"]), decimal(o["extra_amount"]),
+            int(o["waive_work"]), int(o["waive_total"]), decimal(o["manual_total"]) if o["manual_total"] is not None else None,
+            3, 10000, o["reason"], rules["version"], "https://www.jungpan.com/Admin/1688/Order_L.asp?gMnu1=123&gMnu2=12302",
+            f"shOrdNo={o['jungpan_order']}; BL={batch.bl}; 최신 작업기록을 하위주문·트래킹별 중복 제거",
             str(getattr(batch, "created_at", "")), str(getattr(batch, "approved_by", ""))])
-    return {RAW: raw, COST: cost, BILL: bills, APPROVAL: approvals}
+    return {BILL: bills, APPROVAL: approvals}
 
 
 def formula_rows(batch, plan):
     data = build_rows(batch)
-    targets = plan["targets"]
-    approval_rows = {o["id"]: targets[APPROVAL]["start"] + i for i, o in enumerate(batch.orders)}
-    seen, bill_index = set(), 0
-    for i, product in enumerate(batch.source["products"]):
-        row = targets[RAW]["start"] + i
-        cost_row = targets[COST]["start"] + i
-        key = product["child_seq"]
-        order = next(o for o in batch.orders if o["id"] == key)
-        first = key not in seen
-        seen.add(key)
-        p = f"'{APPROVAL}'!"
-        a = lambda col: f"{p}{col}{approval_rows[key]}"
-        r = lambda col: f"{col}{row}"
-        ref = lambda col: f"'{RAW}'!{col}{row}"
-        raw = data[RAW][i]
-        has_bill = first and (raw[8] or raw[9] or raw[10] or raw[40] or decimal(order["extra_hours"]) or decimal(order["extra_amount"]))
-        formulas = {17: a("D"), 18: f'{r("I")}*{a("I")}*{r("R")}', 19: f'{r("J")}*{a("J")}*{r("R")}',
-            20: f'{r("K")}*{a("K")}*{r("R")}',
-            23: f'SUM({r("S")}:{r("W")})+{r("AX")}*{a("L")}+({r("AY")}*{a("M")}+{r("AZ")}*{a("N")}+{r("H")}*{a("O")})*{r("R")}',
-            42: f'{r("AO")}-{r("X")}', 43: f'IF({r("AO")}=0,0,{r("AQ")}/{r("AO")})',
-            44: f'IF({r("AO")}=0,0,{r("X")}/{r("AO")})'}
-        if first:
-            formulas.update({24: a("P"), 25: f'MAX(0,{r("I")}-{r("Y")})+{a("Q")}',
-                26: f'(IF({a("S")}=1,0,MAX(0,{r("I")}-{r("Y")}))+{a("Q")})*{a("E")}*(1+{a("F")})',
-                27: f'ROUND(MAX(0,{r("H")}-{a("V")})*{a("W")}*(1+{a("F")}),0)',
-                34: f'ROUND(MAX(0,{r("K")}-{a("G")})*{a("H")}*{r("R")}*(1+{a("F")}),0)',
-                37: f'{r("AA")}-{a("Q")}*{a("E")}*(1+{a("F")})+{r("AB")}+{r("AI")}',
-                39: f'ROUNDDOWN(IF({a("T")}=1,0,IF(ISNUMBER({a("U")}),{a("U")},{r("AL")}+{a("Q")}*{a("E")}*(1+{a("F")})+{a("R")}))/10,0)*10',
-                40: r("AN")})
-        for col, formula in formulas.items():
-            raw[col] = Formula("=" + formula)
-        cost = data[COST][i]
-        for col, source in {6:"R",7:"H",10:"I",11:"S",12:"AX",14:"AY",16:"AZ",18:"BA",20:"BB",22:"J",23:"T",24:"K",25:"U",29:"X"}.items():
-            cost[col] = Formula("=" + ref(source))
-        cost[8] = Formula("=" + a("O"))
-        for col, formula in {9:f'H{cost_row}*I{cost_row}*G{cost_row}', 13:f'M{cost_row}*{a("L")}',
-            15:f'O{cost_row}*{a("M")}*G{cost_row}',17:f'Q{cost_row}*{a("N")}*G{cost_row}'}.items():
-            cost[col] = Formula("=" + formula)
-        if has_bill:
-            bill = data[BILL][bill_index]
-            b = targets[BILL]["start"] + bill_index
-            for col, source in {7:"I",8:"Y",9:"Z",12:"AA",13:"K",17:"R",18:"AI",19:"H",21:"AB",22:"AL",24:"AO",25:"AO"}.items():
-                bill[col] = Formula("=" + ref(source))
-            for col, formula in {10:f'M{b}/(1+{a("F")})',11:f'M{b}-K{b}',14:a("G"),15:f'MAX(0,N{b}-O{b})',
-                16:f'P{b}*{a("H")}',20:f'MAX(0,T{b}-{a("V")})'}.items():
-                bill[col] = Formula("=" + formula)
-            bill_index += 1
+    for i, row in enumerate(data[BILL]):
+        b = plan["targets"][BILL]["start"] + i
+        a = plan["targets"][APPROVAL]["start"] + i
+        ref = lambda col: f"'{APPROVAL}'!{col}{a}"
+        formulas = {8: ref("P"), 9: f'IF({ref("S")}=1,0,MAX(0,H{b}-I{b}))+{ref("Q")}', 10: f'J{b}*{ref("E")}',
+            11: f'K{b}*{ref("F")}', 12: f'SUM(K{b}:L{b})', 14: ref("G"), 15: f'MAX(0,N{b}-O{b})', 16: f'P{b}*{ref("H")}',
+            17: ref("D"), 18: f'ROUND(Q{b}*R{b}*(1+{ref("F")}),0)', 20: f'MAX(0,T{b}-{ref("V")})',
+            21: f'ROUND(U{b}*{ref("W")}*(1+{ref("F")}),0)',
+            22: f'M{b}-{ref("Q")}*{ref("E")}*(1+{ref("F")})+S{b}+V{b}',
+            24: f'ROUNDDOWN(IF({ref("T")}=1,0,IF(ISNUMBER({ref("U")}),{ref("U")},W{b}+{ref("Q")}*{ref("E")}*(1+{ref("F")})+{ref("R")}))/10,0)*10', 25: f'Y{b}'}
+        for col, value in formulas.items():
+            row[col] = Formula("=" + value)
     return data
 
 
@@ -249,39 +152,30 @@ class Sheets:
         if self.marker(batch.id, meta):
             return {"already_saved": True}
         props = {s["properties"]["title"]: s["properties"] for s in meta["sheets"]}
-        for name in (RAW, COST, BILL):
-            if name not in props:
-                raise DataError(f"필요한 시트가 없습니다: {name}")
+        if BILL not in props:
+            raise DataError(f"필요한 시트가 없습니다: {BILL}")
+        columns, headers = self.values([f"'{BILL}'!B4:B{min(14955,props[BILL]['gridProperties']['rowCount'])}", f"'{BILL}'!A3:AD3"])
+        if not headers or fingerprint(headers[0]) != BILL_HEADER_HASH:
+            raise DataError("청구 입력의 열 구조가 변경되었습니다. 저장을 중단했습니다.")
+        if any(r and str(r[0]) == batch.bl for r in columns):
+            raise DataError("이 BL은 기존 시트에 있습니다. 중복 저장을 차단했습니다. 화면의 계산 결과는 확인할 수 있습니다.")
+        starts = {BILL: max((i+5 for i,r in enumerate(columns) if r and r[0] != ""),default=4)}
         create_approval = APPROVAL not in props
         if create_approval:
             used = {p["sheetId"] for p in props.values()}
-            approval_id = next(i for i in range(1619030188, 1619030288) if i not in used)
+            approval_id = next(i for i in range(1619030188,1619030288) if i not in used)
             props[APPROVAL] = {"sheetId": approval_id, "gridProperties": {"rowCount": 1000}}
-        columns = self.values([f"'{name}'!B{first}:B{min(15000, props[name]['gridProperties']['rowCount'])}"
-                              for name, first in ((RAW,6),(COST,4),(BILL,4))] +
-                              [f"'{RAW}'!A5:BF5", f"'{COST}'!A3:AG3", f"'{BILL}'!A3:AD3"])
-        for name, header, width in zip((RAW,COST,BILL), columns[3:], (57,33,30)):
-            if not header or fingerprint(header[0][:width]) != HEADER_HASHES[name]:
-                raise DataError(f"{name}의 열 구조가 변경되었습니다. 잘못된 열에 쓰지 않도록 저장을 중단했습니다.")
-        headers = columns[3][0]
-        if len(headers) < 57 or headers[1] != "묶음 주문번호" or headers[49] != "바코드 수량":
-            raise DataError("주문 데이터의 열 구조가 변경되었습니다. 저장하지 않았습니다.")
-        if len(headers) > 57 and headers[57] not in ("", "시스템 고유키"):
-            raise DataError("시스템 고유키를 기록할 BF열을 확인해 주세요.")
-        starts = {}
-        for name, rows, first in zip((RAW, COST, BILL), columns[:3], (6, 4, 4)):
-            if any(r and str(r[0]) == batch.bl for r in rows):
-                raise DataError("이 BL이 기존 공유시트에 있습니다. 중복 저장을 차단했습니다. 기존 자료 보정은 원본 대조 후 별도로 진행해 주세요.")
-            starts[name] = max((i + first + 1 for i, r in enumerate(rows) if r and r[0] != ""), default=first)
-        approval_keys = []
-        if not create_approval:
-            approval_keys, approval_headers = self.values([f"'{APPROVAL}'!A:A", f"'{APPROVAL}'!A1:AC1"])
-            if not approval_headers or approval_headers[0] != APPROVAL_HEADERS:
+            starts[APPROVAL] = 2
+        else:
+            keys, headers = self.values([f"'{APPROVAL}'!A:A", f"'{APPROVAL}'!A1:AC1"])
+            if not headers or headers[0] != APPROVAL_HEADERS:
                 raise DataError("시스템 승인기준 탭의 열 구조를 확인해 주세요.")
-        starts[APPROVAL] = max(2, len(approval_keys) + 1)
+            starts[APPROVAL] = max(2,len(keys)+1)
         data = build_rows(batch)
+        if not data[BILL]:
+            raise DataError("청구할 금액이 없어 시트에 추가할 행이 없습니다.")
         targets = {name: {"start": starts[name], "count": len(rows), "sheet_id": props[name]["sheetId"],
-                         "grid_rows": props[name]["gridProperties"]["rowCount"]} for name, rows in data.items()}
+                         "grid_rows": props[name]["gridProperties"]["rowCount"]} for name,rows in data.items()}
         return {"targets": targets, "data_hash": fingerprint(data), "sheet_id": settings.SHEET_ID, "create_approval": create_approval}
 
     def save(self, batch):
@@ -306,7 +200,7 @@ class Sheets:
                 raise DataError("기존 자동 집계 수식의 행 범위를 확장한 후 다시 저장해 주세요.")
             if end > target["grid_rows"]:
                 requests.append({"appendDimension": {"sheetId": target["sheet_id"], "dimension": "ROWS", "length": end - target["grid_rows"]}})
-            if name != APPROVAL and target["start"] > (6 if name == RAW else 4):
+            if name == BILL and target["start"] > 4:
                 requests.append({"copyPaste": {"source": {"sheetId": target["sheet_id"], "startRowIndex": target["start"]-2,
                     "endRowIndex": target["start"]-1, "startColumnIndex": 0, "endColumnIndex": len(rows[0])},
                     "destination": {"sheetId": target["sheet_id"], "startRowIndex": target["start"]-1,
@@ -314,8 +208,6 @@ class Sheets:
             requests.append({"updateCells": {"start": {"sheetId": target["sheet_id"], "rowIndex": target["start"] - 1, "columnIndex": 0},
                              "rows": [{"values": [cell(v) for v in row]} for row in rows], "fields": "userEnteredValue"}})
         requests += [
-            {"updateCells": {"start": {"sheetId": plan["targets"][RAW]["sheet_id"], "rowIndex": 4, "columnIndex": 57},
-                             "rows": [{"values": [cell("시스템 고유키")]}], "fields": "userEnteredValue"}},
             {"createDeveloperMetadata": {"developerMetadata": {"metadataKey": "blcost_batch", "metadataValue": str(batch.id),
                 "location": {"spreadsheet": True}, "visibility": "DOCUMENT"}}},
         ]
@@ -332,7 +224,7 @@ class Sheets:
         for name, rows in data.items():
             if rows:
                 start = batch.sheet_plan["targets"][name]["start"]
-                last = "BF" if name == RAW else "AG" if name == COST else "AD" if name == BILL else "AC"
+                last = "AD" if name == BILL else "AC"
                 ranges.append(f"'{name}'!A{start}:{last}{start + len(rows) - 1}")
                 names.append(name)
         actual = self.values(ranges)

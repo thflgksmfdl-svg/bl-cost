@@ -5,10 +5,10 @@ from unittest.mock import patch, MagicMock
 
 from django.contrib.auth import get_user_model
 from django.test import Client, SimpleTestCase, TestCase
-from .domain import DataError, assemble, calculate, decimal, first_work, packaging, summarize
+from .domain import DataError, assemble, calculate, decimal, first_work, packaging, summarize, review_issues, source_fingerprint, invoice_message
 from .jungpan import parse_child, parse_parent, parse_products
 from .models import Batch
-from .sheets import Sheets, build_rows, cell, formula_rows, Formula, RAW, COST, BILL, APPROVAL
+from .sheets import Sheets, build_rows, cell, formula_rows, Formula, BILL, APPROVAL
 
 RULES = {"month": "2026-11", "version": "test", "exchange": "203.7", "hourly": "15000", "vat": "0.1",
          "free_boxes": "10", "box_cny": "8", "free_hours": [["0", ".5", ".5"], ["100", "1", "1.5"],
@@ -27,11 +27,37 @@ def source():
 
 
 class DomainTests(SimpleTestCase):
+    def test_review_only_targets_billing_decisions_not_general_or_manager_memos(self):
+        for memo in ("3개 부족", "3316599518044076553 입고 되면 출고 하기", "도착한 제품이 파손되어 도착하였습니다", "4박스 사용", "10개 박스 사용", "OPP 1봉씩 포장해주세요"):
+            with self.subTest(memo=memo):
+                s=source()
+                s["children"][0].update(ware_err=memo, manager_memo="OPP 500개 사용 / 추가 비용 받아야함")
+                o=assemble(s)[0]
+                self.assertFalse(o["review_required"])
+                self.assertEqual(review_issues(o,RULES),[])
+                self.assertEqual(summarize([o],RULES)["pending"],0)
+                self.assertNotIn("manager_memo",o)
+
+    def test_cost_reasons_explain_the_decision(self):
+        for memo,kind in (("300개 OPP봉투사용 //6개 박스 사용","opp"),("OPP 봉투 로고 인쇄 비용 받아야함","cost"),("박스 많이 사용","quantity")):
+            with self.subTest(memo=memo):
+                s=source();s["children"][0]["ware_err"]=memo
+                issues=review_issues(assemble(s)[0],RULES)
+                self.assertIn(kind,[i["kind"] for i in issues])
+                self.assertTrue(all(i["text"] and i["action"] for i in issues))
+
+    def test_manager_memo_changes_do_not_invalidate_approved_source(self):
+        s=source();before=source_fingerprint(s)
+        s["children"][0]["manager_memo"]="처리된 메모 변경"
+        self.assertEqual(source_fingerprint(s),before)
+        s["children"][0]["ware_err"]="박스 20개 사용"
+        self.assertNotEqual(source_fingerprint(s),before)
+
     def test_unknown_sheet_structure_stops_before_writing(self):
         client = object.__new__(Sheets)
         meta = {"sheets": [{"properties": {"title": n, "sheetId": i, "gridProperties": {"rowCount":15000}}}
-                           for i,n in enumerate((RAW,COST,BILL))]}
-        with patch.object(client,"metadata",return_value=meta), patch.object(client,"values",return_value=[[],[],[],[],[],[]]), patch.object(client,"call") as call:
+                           for i,n in enumerate((BILL,))]}
+        with patch.object(client,"metadata",return_value=meta), patch.object(client,"values",return_value=[[],[]]), patch.object(client,"call") as call:
             with self.assertRaisesMessage(DataError,"열 구조"):
                 client.prepare(SimpleNamespace(id="test",bl="202601010001"))
         call.assert_not_called()
@@ -102,32 +128,52 @@ class DomainTests(SimpleTestCase):
             with self.assertRaises(DataError):
                 decimal(value)
 
-    def test_sheets_rows_allocate_order_costs_once(self):
+    def test_sheets_export_only_real_charges_and_keep_raw_products_in_db(self):
         s = source()
-        b = SimpleNamespace(id="batch-test", bl=s["bl"], source=s, orders=assemble(s), rules=RULES)
+        orders=assemble(s);orders[0].update(reviewed=True,extra_amount="1000",reason="OPP 비용")
+        b = SimpleNamespace(id="batch-test", bl=s["bl"], source=s, orders=orders, rules=RULES)
         rows = build_rows(b)
-        self.assertEqual(len(rows["주문 데이터"]), 2)
-        self.assertTrue(all(len(r) == 58 for r in rows["주문 데이터"]))
-        self.assertTrue(all(len(r) == 33 for r in rows["원가 정산"]))
-        self.assertTrue(all(len(r) == 30 for r in rows["청구 입력(내가 입력)"]))
-        self.assertEqual(sum(r[8] for r in rows["주문 데이터"]), 2)
-        self.assertEqual(sum(r[45] for r in rows["주문 데이터"]), 52)
-        self.assertEqual(rows["주문 데이터"][0][3], "3316572771225002998")
+        self.assertEqual(set(rows),{BILL,APPROVAL})
+        self.assertEqual(len(rows[BILL]),1)
+        self.assertEqual(len(rows[BILL][0]),30)
+        self.assertEqual(rows[BILL][0][7],2)
+        self.assertEqual(rows[BILL][0][3],"3316572771225002998")
+        self.assertEqual(rows[BILL][0][25],1000)
+        self.assertEqual(rows[BILL][0][28],invoice_message(orders[0],RULES))
+        self.assertEqual(len(b.source["products"]),2)
+        orders[0]["extra_amount"]="0"
+        self.assertEqual(build_rows(b)[BILL],[])
 
     def test_derived_sheet_cells_are_formulas_and_ids_are_literals(self):
         s = source()
-        b = SimpleNamespace(id="batch-test", bl=s["bl"], source=s, orders=assemble(s), rules=RULES)
-        plan = {"targets": {name: {"start": 10} for name in (RAW, COST, BILL, APPROVAL)}}
+        orders=assemble(s);orders[0].update(reviewed=True,boxes=20)
+        b = SimpleNamespace(id="batch-test", bl=s["bl"], source=s, orders=orders, rules=RULES)
+        plan = {"targets": {name: {"start": 10} for name in (BILL, APPROVAL)}}
         rows = formula_rows(b, plan)
-        self.assertIsInstance(rows[RAW][0][40], Formula)
-        self.assertIsInstance(rows[COST][0][29], Formula)
-        self.assertEqual(cell(rows[RAW][0][3])["userEnteredValue"], {"stringValue": "3316572771225002998"})
+        self.assertIsInstance(rows[BILL][0][25], Formula)
+        self.assertEqual(cell(rows[BILL][0][3])["userEnteredValue"], {"stringValue": "3316572771225002998"})
         for values in rows.values():
             for row in values:
                 for v in row:
                     if isinstance(v, Formula):
                         self.assertEqual(v.count("("), v.count(")"), v)
                         self.assertIn("formulaValue", cell(v)["userEnteredValue"])
+
+    def test_box_charge_is_automatic_and_message_matches_sheet_format(self):
+        s=source();s["children"][0]["ware_err"]="20개 박스"
+        o=assemble(s)[0]
+        self.assertEqual(review_issues(o,RULES),[])
+        self.assertEqual(summarize([o],RULES)["invoice_total"],"17920")
+        text=invoice_message(o,RULES)
+        self.assertTrue(text.startswith("안녕하세요.\n\n주문번호 "))
+        self.assertIn("박스 초과 사용 청구: 17,926원",text)
+        self.assertIn("최종 청구금액(VAT 포함): 17,920원",text)
+
+    def test_undecided_additional_fee_is_not_a_copyable_invoice(self):
+        o=assemble(source())[0];o["boxes"]=20
+        summary=summarize([o],RULES)
+        self.assertEqual(summary["pending"],1)
+        self.assertEqual(summary["invoice_count"],0)
 
 
 class ParserTests(SimpleTestCase):
@@ -143,12 +189,13 @@ class ParserTests(SimpleTestCase):
     def test_child_uses_last_amount_not_quantity_or_first_amount(self):
         cells = ['<input name="chkORD_SEQ" value="18053">', '202611170061', '', '회원', '지정배송지(선불)<br>테스트 고객', '', '', '16 / 16<br>￥ 10.5<br>￥ 9.3', '', '', '', '', '']
         html = '<table id="orderTable"><tr>' + ''.join(f'<td>{v}</td>' for v in cells) + '</tr></table>'
-        for name in ("WareErrMemo", "MgrMemo", "AdmMemo"):
+        for name in ("WareErrMemo", "AdmMemo"):
             html += f'<input id="{name}18053" value="">'
         html += '<select id="BoxCnt18053"><option selected value="0">0</option></select>'
         c = parse_child(html, {"seq": "18053", "number": "202611170061"})
         self.assertEqual(c["amount"], "9.3")
         self.assertEqual(c["recipient"], "테스트 고객")
+        self.assertNotIn("manager_memo",c)
 
 
 class WorkflowTests(TestCase):
@@ -168,6 +215,37 @@ class WorkflowTests(TestCase):
     def test_anonymous_has_no_access_to_financial_data(self):
         self.client.logout()
         self.assertEqual(self.client.get("/api/batches/").status_code, 302)
+
+    def test_existing_draft_reclassifies_without_overwriting_source_or_decisions(self):
+        o=self.batch.orders[0]
+        o.update(memo="3개 부족",opp=None,boxes=None,review_required=True,manager_memo="이미 처리된 추가 비용",extra_amount="1000",reason="기존 결정 보존")
+        self.batch.save()
+        result=self.client.get(f"/api/batches/{self.batch.id}/").json()
+        self.assertEqual(result["summary"]["pending"],0)
+        self.assertEqual(result["decisions"],[])
+        self.assertNotIn("orders",result)
+        self.assertNotIn("manager_memo",result["invoices"][0])
+        self.assertEqual(result["invoices"][0]["extra_amount"],"1000")
+        self.batch.refresh_from_db()
+        self.assertTrue(self.batch.orders[0]["review_required"])
+        self.assertEqual(self.batch.source,source())
+
+    def test_declining_fee_removes_free_order_from_customer_view(self):
+        r=self.post("edit",order_id="17974",changes={"reviewed":True,"extra_hours":"0","extra_amount":"0"})
+        self.assertEqual(r.status_code,200)
+        self.assertEqual(r.json()["decisions"],[])
+        self.assertEqual(r.json()["invoices"],[])
+        self.batch.refresh_from_db()
+        self.assertTrue(self.batch.source["products"])
+
+    def test_extra_fee_updates_invoice_total_and_customer_message(self):
+        r=self.post("edit",order_id="17974",changes={"reviewed":True,"extra_hours":".5","extra_amount":"1000","reason":"OPP 부자재"})
+        self.assertEqual(r.status_code,200)
+        data=r.json()
+        self.assertEqual(data["summary"]["invoice_total"],"9250")
+        self.assertEqual(len(data["invoices"]),1)
+        self.assertIn("최종 청구금액(VAT 포함): 9,250원",data["invoices"][0]["message"])
+        self.assertIn("별도 추가금액: 1,000원",data["invoices"][0]["message"])
 
     def test_duplicate_bl_returns_same_batch(self):
         r = self.client.post("/api/batches/", json.dumps({"bl": self.batch.bl}), content_type="application/json")

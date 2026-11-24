@@ -4,7 +4,6 @@ import re
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 
 WORK_TYPES = ("바코드", "스티커", "재봉", "벌크작업", "인쇄스티커", "도장", "작업시간", "작업필요없음")
-PACK_WORDS = re.compile(r"opp|봉투|박스|뽁뽁이|뾱뾱이|袋|箱|비용|청구|받아야", re.I)
 
 
 class DataError(ValueError):
@@ -27,6 +26,37 @@ def decimal(value, *, minimum=Decimal("0"), maximum=Decimal("1000000000")):
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def source_fingerprint(source):
+    return fingerprint({**source, "children": [{k: v for k, v in c.items() if k != "manager_memo"}
+                                               for c in source.get("children", [])]})
+
+
+def review_issues(order, rules):
+    memo = order.get("memo", "")
+    issues = []
+    def add(kind, text, action):
+        issues.append({"kind": kind, "text": text, "action": action})
+    if order.get("opp"):
+        add("opp", f"opp 봉투 {order['opp']}개 사용", "추가 청구할 시간 또는 금액을 정하세요. 추가하지 않으면 두 항목을 0으로 두세요.")
+    if re.search(r"비용|청구|받아야|유료|추가\s*(?:금액|요금|작업비)", memo):
+        add("cost", "입고오류메시지에 별도 비용 안내가 있습니다", "원문의 비용을 추가 청구시간 또는 별도 추가금액에 반영하세요. 이미 기본 청구에 포함됐다면 0으로 두세요.")
+    instructions = re.search(r"해주세요|해\s*주세요|사용\s*예정|요청사항", memo)
+    if not instructions and re.search(r"사용|소모", memo) and re.search(r"opp|봉투|박스|뽁뽁이|뾱뾱이", memo, re.I):
+        missing = (re.search(r"opp|봉투", memo, re.I) and order.get("opp") is None) or ("박스" in memo and order.get("boxes") is None)
+        if missing:
+            add("quantity", "메모의 포장재 사용량을 확정하지 못했습니다", "입고오류메시지의 실제 사용량을 확인해 수량을 입력한 뒤 추가 청구 여부를 정하세요.")
+    for warning in order.get("warnings", []):
+        if warning.startswith("박스 선택값"):
+            add("quantity", warning, "입고오류메시지와 실제 사용량을 대조해 박스 실사용량을 확정하세요.")
+        elif warning.startswith("같은 1688"):
+            add("free_hours", "같은 오더넘버가 다른 하위 주문에도 있습니다", "무료시간이 중복 적용되는지 확인하고, 필요하면 무료시간 직접 보정에 입력하세요.")
+    if not order.get("customer"):
+        add("customer", "고객명이 비어 있습니다", "청구할 고객명을 입력하세요.")
+    if order.get("mode") not in ("직접수령", "로켓그로스"):
+        add("mode", "입고방식을 확인해야 합니다", "직접수령 또는 로켓그로스를 선택해야 무료시간을 계산할 수 있습니다.")
+    return issues
 
 
 def first_work(text):
@@ -81,15 +111,14 @@ def assemble(source):
             if box_field and pack["boxes"] is None:
                 pack["boxes"] = int(box_field)
             memo = child.get("ware_err", "").strip()
-            required = bool(memo.strip(". \n~"))
             ship = child.get("shipping", "")
             mode = "로켓그로스" if "쿠팡로켓그로스" in ship else "직접수령" if "지정배송지" in ship else ""
             grouped[key] = {"id": key, "jungpan_order": child["number"], "shop_orders": [], "trackings": [],
                 "customer": child.get("recipient", ""), "member": child.get("member", ""), "mode": mode,
                 "amount": str(decimal(child["amount"])), "work": {}, "products": [], "memo": memo,
-                "manager_memo": child.get("manager_memo", ""), "admin_memo": child.get("admin_memo", ""),
+                "admin_memo": child.get("admin_memo", ""),
                 "opp": pack["opp"], "boxes": pack["boxes"], "cbm": "0", "warnings": [],
-                "review_required": required or bool(pack["opp"] or pack["boxes"]), "reviewed": False,
+                "review_required": False, "reviewed": False,
                 "extra_hours": "0", "extra_amount": "0", "reason": "", "waive_work": False,
                 "waive_total": False, "manual_total": None, "free_hours_override": None}
             if box_conflict:
@@ -115,6 +144,7 @@ def assemble(source):
             o["review_required"] = True
         if o["opp"] or o["boxes"]:
             o["warnings"].append("포장재 규격이 없어 원가표의 기준 단가를 적용합니다.")
+        o["review_required"] = bool(review_issues(o, {}))
     return list(grouped.values())
 
 
@@ -175,7 +205,34 @@ def summarize(orders, rules):
         for k, v in o["work"].items():
             totals[k] = str(decimal(totals.get(k, 0)) + decimal(v))
     calcs = [calculate(o, rules) for o in orders]
+    invoices = [c for o,c in zip(orders,calcs) if c["ready"] and decimal(c["total"]) > 0
+                and (o["reviewed"] or not review_issues(o,rules))]
     return {"orders": len(orders), "products": sum(len(o["products"]) for o in orders), "work": totals,
-            "pending": sum(1 for o in orders if o["review_required"] and not o["reviewed"]),
+            "pending": sum(1 for o in orders if review_issues(o, rules) and not o["reviewed"]),
             "total": str(sum((decimal(c["total"]) for c in calcs if c["ready"]), Decimal("0"))),
+            "invoice_count":len(invoices), "invoice_total":str(sum((decimal(c["total"]) for c in invoices),Decimal("0"))),
             "calculation_ready": all(c["ready"] for c in calcs)}
+
+
+def invoice_message(order, rules):
+    c = calculate(order,rules)
+    if not c["ready"] or not decimal(c["total"]):
+        return ""
+    q = lambda v: format(decimal(v).normalize(),"f")
+    charge_hours=(Decimal(0) if order.get("waive_work") else decimal(c["charge_hours"]))+decimal(order["extra_hours"])
+    lines = ["안녕하세요.", "", f"주문번호 {', '.join(order['shop_orders'])} 추가 비용 안내드립니다.",
+        f"- {order['mode']} / 총 작업시간 {q(c['actual_hours'])}시간 / 무료시간 {q(c['free_hours'])}시간 / 청구시간 {q(charge_hours)}시간"]
+    if decimal(c["box_charge"]):
+        lines.append(f"- 박스 초과 사용 청구: {decimal(c['box_charge']):,.0f}원")
+    if decimal(c["cbm_charge"]):
+        lines.append(f"- CBM {q(order['cbm'])} / 초과 {q(max(Decimal(0),decimal(order['cbm'])-3))}CBM 청구: {decimal(c['cbm_charge']):,.0f}원")
+    if decimal(order["extra_hours"]):
+        lines.append(f"- 별도 추가 청구시간 {q(order['extra_hours'])}시간: {decimal(c['extra_time_charge']):,.0f}원")
+    if decimal(order["extra_amount"]):
+        lines.append(f"- 별도 추가금액: {decimal(order['extra_amount']):,.0f}원")
+    if order["reason"] and (decimal(order["extra_hours"]) or decimal(order["extra_amount"]) or order.get("manual_total") is not None or order.get("waive_work")):
+        lines.append(f"- 안내: {order['reason']}")
+    if order.get("waive_work"):
+        lines.append("- 기본 작업비 면제 적용")
+    lines += [f"- 최종 청구금액(VAT 포함): {decimal(c['total']):,.0f}원", "", "확인 부탁드리며, 비용은 하단 링크에서 결제 부탁드립니다."]
+    return "\n".join(lines)

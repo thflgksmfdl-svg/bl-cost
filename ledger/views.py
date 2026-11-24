@@ -14,7 +14,7 @@ from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
-from .domain import DataError, calculate, decimal, summarize
+from .domain import DataError, calculate, decimal, summarize, review_issues, invoice_message
 from .models import Audit, Batch, LoginAttempt
 from .sheets import Sheets
 
@@ -33,9 +33,22 @@ def serialized(batch, detail=False):
     data = {"id": str(batch.id), "bl": batch.bl, "state": batch.state, "progress": batch.progress,
             "total": batch.total, "summary": batch.summary, "revision": batch.revision, "error": batch.error,
             "created_at": batch.created_at.isoformat(), "updated_at": batch.updated_at.isoformat()}
+    if batch.orders:
+        data["summary"] = summarize(batch.orders, batch.rules)
     if detail:
-        data.update(orders=[{**o, "calculation": calculate(o, batch.rules)} for o in batch.orders],
-                    rules=batch.rules, sheet_plan=batch.sheet_plan, sheet_result=batch.sheet_result,
+        decisions, invoices = [], []
+        for order in batch.orders:
+            o = {k:v for k,v in order.items() if k in {"id","customer","jungpan_order","shop_orders","trackings","mode","amount","memo","opp","boxes","extra_hours","extra_amount","reason","free_hours_override","reviewed"}}
+            issues = review_issues(order, batch.rules)
+            c=calculate(order,batch.rules)
+            o.update(review_issues=issues,calculation=c)
+            if issues and not order["reviewed"]:
+                decisions.append(o)
+            elif c["ready"] and decimal(c["total"]) > 0:
+                o["message"]=invoice_message(order,batch.rules)
+                invoices.append(o)
+        data.update(decisions=decisions,invoices=invoices,
+                    rules={k:v for k,v in batch.rules.items() if k in ("month","version","free_boxes")},
                     audit=list(batch.audit_set.order_by("-created_at").values("action", "created_at", "actor__username")[:25]))
     return data
 
@@ -189,7 +202,10 @@ def batch_action(request, pk, action):
                 new = []
                 for o in batch.orders:
                     if o["id"] == order_id:
-                        new.append(edited_order(o, data.get("changes", {})))
+                        edited = edited_order(o, data.get("changes", {}))
+                        if edited["reviewed"] and not calculate(edited,batch.rules)["ready"]:
+                            raise DataError("고객명·입고방식·계산 기준을 확인해 주세요.")
+                        new.append(edited)
                         found = True
                     else:
                         new.append(o)
