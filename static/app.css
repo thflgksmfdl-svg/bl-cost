@@ -128,6 +128,12 @@ dialog::backdrop { background:var(--color-backdrop); }
 .invoice-amount { font-size:var(--text-xl); font-variant-numeric:tabular-nums; white-space:nowrap; }
 .message-preview { margin-top:var(--space-sm); font-size:var(--text-sm); }
 .message-preview textarea { display:block; margin-top:var(--space-xs); min-height:200px; }
+.lookup-toast { position:fixed; inset-inline:0; bottom:var(--space-lg); z-index:var(--z-toast); display:flex; align-items:center; gap:var(--space-sm); width:min(420px,calc(100% - 32px)); margin-inline:auto; padding:var(--space-md); border:1px solid var(--color-rule); border-radius:var(--radius-card); background:var(--color-surface); box-shadow:var(--shadow-card); pointer-events:none; animation:lookup-arrive 180ms ease-out; }
+.lookup-toast svg { flex:0 0 48px; width:48px; height:48px; fill:none; stroke:var(--color-accent-deep); stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.lookup-toast strong { display:block; font-size:var(--text-md); }
+.lookup-toast p { margin-top:var(--space-2xs); font-size:var(--text-sm); color:var(--color-ink-2); }
+@keyframes lookup-arrive { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+@media(prefers-reduced-motion:reduce) { .lookup-toast { animation:none; } }
 .corrections:has(> :not([hidden])) { margin-bottom:var(--space-md); }
 @media(max-width:48rem) {
   .summary { grid-template-columns:repeat(2,minmax(0,1fr)); }

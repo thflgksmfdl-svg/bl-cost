@@ -24,5 +24,9 @@
   <div class="price-preview" aria-live="polite"><div><span>기본 청구</span><strong id="preview-base"></strong></div><div><span>추가시간 비용</span><strong id="preview-time"></strong></div><div><span>별도 추가금액</span><strong id="preview-extra"></strong></div><div class="price-total"><span>최종 청구금액</span><strong id="preview-total"></strong></div></div><p id="review-error" class="help" role="alert"></p></div>
   <div class="dialog-footer"><button id="review-decline" class="quiet" type="button">추가 없이 확정</button><button id="review-save" class="primary" type="submit">추가 청구 반영</button></div>
 </form></dialog>
+<aside id="lookup-toast" class="lookup-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
+  <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false"><path d="m8 14 14-7 14 7v21a4 4 0 0 1-4 4H12a4 4 0 0 1-4-4Z"/><path d="m8 14 14 7 14-7M22 7v14"/><circle cx="16" cy="28" r="1"/><circle cx="28" cy="28" r="1"/><path d="M18 32q4 4 8 0"/></svg>
+  <div><strong>조회 요청을 보냈어요</strong><p>잠시만 기다려 주세요. 진행 상황은 아래에 표시돼요.</p></div>
+</aside>
 <noscript><p class="container notice">고객 청구 화면을 사용하려면 JavaScript를 켜 주세요.</p></noscript>{% endblock %}
 {% block scripts %}<script src="{% static 'app.js' %}" defer></script>{% endblock %}
