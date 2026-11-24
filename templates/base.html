@@ -1,9 +1,9 @@
 {% load static %}<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="BL별 중판 작업내역을 조회하고 추가 청구를 검토하는 직원용 정산 시스템">
+<meta name="description" content="BL별 중판 작업내역을 조회하고 추가 비용을 결정하는 고객 청구 정산 시스템"><meta name="robots" content="noindex,nofollow">
 <title>{% block title %}BL 작업비 정산{% endblock %}</title><link rel="stylesheet" href="{% static 'app.css' %}"></head>
 <body><a class="skip" href="#main">본문으로 이동</a>
 <header class="topbar"><div class="container topbar-inner"><a class="wordmark" href="/">bl-cost<span>작업비 정산</span></a>
-{% if user.is_authenticated %}<nav aria-label="계정 메뉴"><span>{{ user.username }}</span><a href="/account/password/">비밀번호 변경</a>{% if user.is_staff %}<a href="/admin/auth/user/">직원 관리</a>{% endif %}<form action="/logout/" method="post">{% csrf_token %}<button class="text-button" type="submit">로그아웃</button></form></nav>{% endif %}</div></header>
+<nav aria-label="바로가기"><a href="https://docs.google.com/spreadsheets/d/1t_NcYwbYVcP2JGUJnE2tle8vVuZnyhKMFBPHl_0XwHg/edit#gid=1504460464" target="_blank" rel="noopener noreferrer">공유시트 열기 ↗</a></nav></div></header>
 {% block content %}{% endblock %}<footer class="container footer">실제 작업과 청구 결정을 나누어 기록합니다.</footer>
 {% block scripts %}{% endblock %}</body></html>

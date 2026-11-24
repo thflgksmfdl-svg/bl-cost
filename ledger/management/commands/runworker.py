@@ -35,7 +35,7 @@ def process(batch):
             Audit.objects.create(batch=batch, action="수집 완료", detail={"summary": batch.summary, "source_hash": batch.source_hash})
     else:
         client = Sheets()
-        if not client.marker(batch.id):
+        if not client.marker(batch):
             with Jungpan() as jp:
                 source = jp.collect(batch.bl, lambda data, done, total: Batch.objects.filter(pk=batch.pk).update(
                     progress=done, total=total, updated_at=timezone.now()))

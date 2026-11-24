@@ -1,4 +1,5 @@
 import json
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -6,7 +7,7 @@ from urllib.parse import urlparse, parse_qs
 
 from django.contrib.auth import get_user_model
 from django.test import Client, SimpleTestCase, TestCase
-from .domain import DataError, assemble, calculate, decimal, first_work, packaging, summarize, review_issues, source_fingerprint, invoice_message
+from .domain import DataError, ReviewRequired, assemble, calculate, decimal, first_work, packaging, summarize, review_issues, source_fingerprint, invoice_message, fingerprint
 from .jungpan import parse_child, parse_parent, parse_products, tracking_url
 from .models import Batch
 from .sheets import Sheets, build_rows, cell, formula_rows, Formula, BILL, APPROVAL
@@ -223,9 +224,14 @@ class WorkflowTests(TestCase):
     def post(self, action, **values):
         return self.client.post(f"/api/batches/{self.batch.id}/{action}/", json.dumps({"revision": 0, **values}), content_type="application/json")
 
-    def test_anonymous_has_no_access_to_financial_data(self):
+    def test_public_app_opens_and_creates_requests_without_employee_login(self):
         self.client.logout()
-        self.assertEqual(self.client.get("/api/batches/").status_code, 302)
+        self.assertEqual(self.client.get("/").status_code, 200)
+        self.assertEqual(self.client.get("/api/batches/").status_code, 200)
+        r=self.client.post("/api/batches/",json.dumps({"bl":"202611190043"}),content_type="application/json")
+        self.assertEqual(r.status_code,201)
+        self.assertIsNone(Batch.objects.get(bl="202611190043").created_by)
+        self.assertRedirects(self.client.get("/login/"),"/")
 
     def test_source_links_preserve_every_tracking_on_the_order(self):
         self.batch.orders[0]["trackings"]=["753560928","79049245784592"]
@@ -255,6 +261,8 @@ class WorkflowTests(TestCase):
         self.assertEqual(r.status_code,200)
         self.assertEqual(r.json()["decisions"],[])
         self.assertEqual(r.json()["invoices"],[])
+        self.assertEqual(len(r.json()["completed_decisions"]),1)
+        self.assertEqual(r.json()["completed_decisions"][0]["extra_amount"],"0")
         self.batch.refresh_from_db()
         self.assertTrue(self.batch.source["products"])
 
@@ -272,8 +280,36 @@ class WorkflowTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(Batch.objects.count(), 1)
 
-    def test_operator_cannot_approve(self):
-        self.assertEqual(self.post("approve").status_code, 403)
+    def test_public_user_can_request_save_and_retry_without_staff_role(self):
+        self.client.logout()
+        self.batch.orders[0].update(reviewed=True,extra_amount="1000",reason="OPP 비용")
+        self.batch.save()
+        with patch("ledger.views.Sheets") as sheets:
+            sheets.return_value.rules.return_value=RULES
+            sheets.return_value.prepare.return_value={"targets":{},"write_key":"test"}
+            self.assertEqual(self.post("approve").status_code,200)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.state,"approved")
+        self.assertIsNone(self.batch.approved_by)
+        self.assertIsNotNone(self.batch.approved_at)
+        self.batch.state="error";self.batch.save()
+        r=self.post("retry",revision=self.batch.revision)
+        self.assertEqual(r.status_code,200)
+        self.assertEqual(r.json()["state"],"approved")
+
+    def test_completed_and_saved_decisions_can_be_corrected_without_sheet_write(self):
+        self.client.logout()
+        self.batch.orders[0].update(reviewed=True,extra_amount="1000",reason="OPP 비용")
+        self.batch.state="saved";self.batch.sheet_result={"verified":True};self.batch.save()
+        with patch("ledger.views.Sheets") as sheets:
+            self.assertEqual(self.post("preview",order_id="17974",changes={"extra_amount":"0"}).status_code,200)
+            r=self.post("edit",order_id="17974",changes={"extra_amount":"0","reviewed":True})
+        self.assertEqual(r.status_code,200)
+        self.assertEqual(r.json()["state"],"review")
+        self.assertEqual(r.json()["invoices"],[])
+        self.assertEqual(r.json()["completed_decisions"][0]["extra_amount"],"0")
+        self.assertTrue(r.json()["sheet_result"]["verified"])
+        sheets.assert_not_called()
 
     def test_stale_revision_and_negative_values_rejected(self):
         r = self.post("edit", revision=99, order_id="17974", changes={"boxes": 0})
@@ -300,7 +336,6 @@ class WorkflowTests(TestCase):
 
     def test_csrf_is_required(self):
         client = Client(enforce_csrf_checks=True, HTTP_X_FORWARDED_PROTO="https")
-        client.force_login(self.user)
         self.assertEqual(client.post("/api/batches/", {"bl": "202611240025"}).status_code, 403)
 
     def test_new_deploy_waits_for_previous_worker_instead_of_exiting(self):
@@ -327,3 +362,91 @@ class SheetRecoveryTests(SimpleTestCase):
             self.assertEqual(client.save(batch), {"verified": True})
             call.assert_not_called()
             verify.assert_called_once_with(batch)
+
+
+class SheetSyncTests(SimpleTestCase):
+    def setUp(self):
+        self.client=object.__new__(Sheets)
+        self.order=assemble(source())[0]
+        self.order.update(reviewed=True,extra_amount="2000",reason="OPP 비용")
+        self.batch=SimpleNamespace(id="batch-test",bl=source()["bl"],orders=[self.order],rules=RULES,
+                                   approved_at="2026-11-24T13:00:00Z",sheet_plan={})
+        old=build_rows(self.batch)[BILL][0]
+        self.rows={4:old}
+        self.meta={"sheets":[{"properties":{"title":BILL,"sheetId":1,"gridProperties":{"rowCount":100}}}]}
+
+    def values(self,ranges,**kwargs):
+        if ranges[-1].endswith("A3:AD3"):
+            return [[self.rows.get(i,[])[1:5] for i in range(4,max(self.rows,default=3)+1)], [["header"]]]
+        result=[]
+        for r in ranges:
+            rownum=int(re.search(r"!A(\d+)",r)[1])
+            result.append([list(self.rows[rownum])])
+        return result
+
+    def prepare(self):
+        with patch.object(self.client,"metadata",return_value=self.meta),patch.object(self.client,"values",side_effect=self.values),patch("ledger.sheets.BILL_HEADER_HASH",fingerprint(["header"])):
+            return self.client.prepare(self.batch)
+
+    def test_existing_bl_updates_matching_row_and_only_appends_new_charge(self):
+        other=list(self.rows[4]);other[1]="202611010001";self.rows[5]=other
+        new={**self.order,"id":"new-order","trackings":["new-tracking"],"extra_amount":"5000"}
+        self.batch.orders.append(new)
+        plan=self.prepare();self.batch.sheet_plan=plan
+        self.assertEqual(plan["targets"][BILL]["rows"],[4,6])
+        self.assertEqual(plan["targets"][BILL]["added_rows"],[6])
+        self.assertTrue(plan["before"])
+        formulas=formula_rows(self.batch,plan)[BILL]
+        self.assertIn("Y4",formulas[0][25]);self.assertIn("Y6",formulas[1][25])
+        with patch.object(self.client,"marker",return_value=None),patch.object(self.client,"prepare",return_value=plan),patch.object(self.client,"call") as call,patch.object(self.client,"verify",return_value={"verified":True}):
+            self.assertTrue(self.client.save(self.batch)["verified"])
+        updates=[r["updateCells"] for r in call.call_args.kwargs["json"]["requests"] if "updateCells" in r and r["updateCells"]["start"]["sheetId"]==1]
+        self.assertEqual([u["start"]["rowIndex"] for u in updates],[3,5])
+        self.assertTrue(all(len(u["rows"])==1 for u in updates))
+
+    def test_legacy_single_tracking_matches_order_with_multiple_trackings(self):
+        self.order["trackings"].append("another-tracking")
+        self.assertEqual(self.prepare()["targets"][BILL]["rows"],[4])
+
+    def test_correcting_charge_to_zero_updates_old_row_instead_of_leaving_old_invoice(self):
+        self.order["extra_amount"]="0"
+        plan=self.prepare()
+        self.assertEqual(plan["targets"][BILL]["rows"],[4])
+        self.assertEqual(plan["targets"][BILL]["added_rows"],[])
+        self.assertEqual(build_rows(self.batch,plan["order_ids"])[BILL][0][25],0)
+        self.assertEqual(build_rows(self.batch)[BILL],[])
+
+    def test_duplicate_or_unmatched_positive_legacy_rows_stop_before_writing(self):
+        self.rows[5]=list(self.rows[4])
+        with self.assertRaisesMessage(DataError,"여러 행"):
+            self.prepare()
+        del self.rows[5];self.rows[4][4]="unknown-tracking"
+        with self.assertRaisesMessage(DataError,"연결하지 못했습니다"):
+            self.prepare()
+
+    def test_sheet_edit_after_confirmation_requires_reconfirmation(self):
+        self.batch.sheet_plan=self.prepare()
+        self.rows[4][29]="사용자가 시트에서 직접 수정"
+        changed=self.prepare()
+        with patch.object(self.client,"marker",return_value=None),patch.object(self.client,"prepare",return_value=changed),patch.object(self.client,"call") as call:
+            with self.assertRaises(ReviewRequired):
+                self.client.save(self.batch)
+        call.assert_not_called()
+
+    def test_write_marker_is_specific_to_each_approved_save(self):
+        plan=self.prepare();self.batch.sheet_plan=plan
+        meta={"developerMetadata":[{"metadataKey":"blcost_batch","metadataValue":plan["write_key"]}]}
+        self.assertIsNotNone(self.client.marker(self.batch,meta))
+        self.batch.approved_at="2026-11-24T13:05:00Z"
+        self.batch.sheet_plan=self.prepare()
+        self.assertIsNone(self.client.marker(self.batch,meta))
+
+    def test_verification_checks_updated_rows_and_preserves_long_ids(self):
+        plan=self.prepare();self.batch.sheet_plan=plan
+        data=build_rows(self.batch,plan["order_ids"])
+        actual=[[[v for v in row]] for rows in data.values() for row in rows]
+        with patch.object(self.client,"marker",return_value={"metadataId":1}),patch.object(self.client,"values",return_value=actual):
+            self.assertTrue(self.client.verify(self.batch)["verified"])
+            actual[0][0][25]=999
+            with self.assertRaisesMessage(DataError,"검산"):
+                self.client.verify(self.batch)

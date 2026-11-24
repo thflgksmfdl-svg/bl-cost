@@ -39,7 +39,7 @@ def cell(value):
     return {"userEnteredValue": {"stringValue": str(value)}}
 
 
-def build_rows(batch):
+def build_rows(batch, include_zero=()):
     bills, approvals = [], []
     rules = batch.rules
     for o in batch.orders:
@@ -48,7 +48,7 @@ def build_rows(batch):
         c = calculate(o, rules)
         if not c["ready"]:
             raise DataError("확정할 수 없는 계산이 남아 있습니다.")
-        if not decimal(c["total"]):
+        if not decimal(c["total"]) and o["id"] not in include_zero:
             continue
         fx, vat = decimal(rules["exchange"]), decimal(rules["vat"])
         hours = decimal(c["actual_hours"])
@@ -71,15 +71,15 @@ def build_rows(batch):
             int(o["waive_work"]), int(o["waive_total"]), decimal(o["manual_total"]) if o["manual_total"] is not None else None,
             3, 10000, o["reason"], rules["version"], "https://www.jungpan.com/Admin/1688/Order_L.asp?gMnu1=123&gMnu2=12302",
             f"shOrdNo={o['jungpan_order']}; BL={batch.bl}; 최신 작업기록을 하위주문·트래킹별 중복 제거",
-            str(getattr(batch, "created_at", "")), str(getattr(batch, "approved_by", ""))])
+            str(getattr(batch, "created_at", "")), str(getattr(batch, "approved_by", None) or "공용 사용자")])
     return {BILL: bills, APPROVAL: approvals}
 
 
 def formula_rows(batch, plan):
-    data = build_rows(batch)
+    data = build_rows(batch, plan.get("order_ids", ()))
     for i, row in enumerate(data[BILL]):
-        b = plan["targets"][BILL]["start"] + i
-        a = plan["targets"][APPROVAL]["start"] + i
+        b = positions(plan["targets"][BILL])[i]
+        a = positions(plan["targets"][APPROVAL])[i]
         ref = lambda col: f"'{APPROVAL}'!{col}{a}"
         formulas = {8: ref("P"), 9: f'IF({ref("S")}=1,0,MAX(0,H{b}-I{b}))+{ref("Q")}', 10: f'J{b}*{ref("E")}',
             11: f'K{b}*{ref("F")}', 12: f'SUM(K{b}:L{b})', 14: ref("G"), 15: f'MAX(0,N{b}-O{b})', 16: f'P{b}*{ref("H")}',
@@ -90,6 +90,10 @@ def formula_rows(batch, plan):
         for col, value in formulas.items():
             row[col] = Formula("=" + value)
     return data
+
+
+def positions(target):
+    return target.get("rows", list(range(target["start"], target["start"] + target.get("count", 1))))
 
 
 class Sheets:
@@ -117,9 +121,9 @@ class Sheets:
         except (TimeoutError, OSError, RequestException, GoogleAuthError):
             raise DataError("구글시트 응답을 확인하지 못했습니다. 저장 표식을 재조회한 후 재시도합니다.") from None
 
-    def values(self, ranges, formatted=False):
+    def values(self, ranges, formatted=False, formulas=False):
         result = self.call("GET", "/values:batchGet", params=[("ranges", r) for r in ranges] +
-                           [("valueRenderOption", "FORMATTED_VALUE" if formatted else "UNFORMATTED_VALUE")])
+                           [("valueRenderOption", "FORMULA" if formulas else "FORMATTED_VALUE" if formatted else "UNFORMATTED_VALUE")])
         return [v.get("values", []) for v in result["valueRanges"]]
 
     def rules(self, month):
@@ -142,24 +146,39 @@ class Sheets:
     def metadata(self):
         return self.call("GET", params={"fields": "spreadsheetId,sheets(properties),developerMetadata"})
 
-    def marker(self, batch_id, metadata=None):
+    def marker(self, batch, metadata=None):
         data = metadata if metadata is not None else self.metadata()
+        key = batch.sheet_plan.get("write_key", str(batch.id))
         return next((m for m in data.get("developerMetadata", [])
-                     if m.get("metadataKey") == "blcost_batch" and m.get("metadataValue") == str(batch_id)), None)
+                     if m.get("metadataKey") == "blcost_batch" and m.get("metadataValue") == key), None)
 
     def prepare(self, batch):
         meta = self.metadata()
-        if self.marker(batch.id, meta):
-            return {"already_saved": True}
         props = {s["properties"]["title"]: s["properties"] for s in meta["sheets"]}
         if BILL not in props:
             raise DataError(f"필요한 시트가 없습니다: {BILL}")
-        columns, headers = self.values([f"'{BILL}'!B4:B{min(14955,props[BILL]['gridProperties']['rowCount'])}", f"'{BILL}'!A3:AD3"])
+        columns, headers = self.values([f"'{BILL}'!B4:E{min(14955,props[BILL]['gridProperties']['rowCount'])}", f"'{BILL}'!A3:AD3"])
         if not headers or fingerprint(headers[0]) != BILL_HEADER_HASH:
             raise DataError("청구 입력의 열 구조가 변경되었습니다. 저장을 중단했습니다.")
-        if any(r and str(r[0]) == batch.bl for r in columns):
-            raise DataError("이 BL은 기존 시트에 있습니다. 중복 저장을 차단했습니다. 화면의 계산 결과는 확인할 수 있습니다.")
-        starts = {BILL: max((i+5 for i,r in enumerate(columns) if r and r[0] != ""),default=4)}
+        existing = [i+4 for i,r in enumerate(columns) if r and str(r[0]) == batch.bl]
+        snapshots = self.values([f"'{BILL}'!A{r}:AD{r}" for r in existing]) if existing else []
+        matches, clear_ids = {}, []
+        for rownum, values in zip(existing, snapshots):
+            row = values[0] if values else []
+            tracks = set(re.split(r"[,\s/]+", str(row[4]).strip())) if len(row)>4 and row[4] else set()
+            candidates = [o for o in batch.orders if tracks and tracks <= set(o["trackings"])]
+            previous = decimal(row[25] or 0) if len(row)>25 else Decimal(0)
+            if len(candidates) != 1:
+                if previous:
+                    raise DataError(f"청구 입력 {rownum}행의 트래킹을 원본 주문 한 건과 연결하지 못했습니다. 기존 행을 확인해 주세요.")
+                continue
+            oid = candidates[0]["id"]
+            if oid in matches:
+                raise DataError(f"청구 입력에 같은 주문이 여러 행에 있습니다({matches[oid]}, {rownum}행). 중복 행을 확인해 주세요.")
+            matches[oid] = rownum
+            if previous:
+                clear_ids.append(oid)
+        starts = {BILL: max((i+5 for i,r in enumerate(columns) if any(v not in (None, "") for v in r)),default=4)}
         create_approval = APPROVAL not in props
         if create_approval:
             used = {p["sheetId"] for p in props.values()}
@@ -171,19 +190,32 @@ class Sheets:
             if not headers or headers[0] != APPROVAL_HEADERS:
                 raise DataError("시스템 승인기준 탭의 열 구조를 확인해 주세요.")
             starts[APPROVAL] = max(2,len(keys)+1)
-        data = build_rows(batch)
+        data = build_rows(batch, clear_ids)
         if not data[BILL]:
             raise DataError("청구할 금액이 없어 시트에 추가할 행이 없습니다.")
+        order_ids = [r[0].split(":")[-1] for r in data[APPROVAL]]
+        bill_rows, next_row, added = [], starts[BILL], []
+        for oid in order_ids:
+            if oid in matches:
+                bill_rows.append(matches[oid])
+            else:
+                bill_rows.append(next_row)
+                added.append(next_row)
+                next_row += 1
         targets = {name: {"start": starts[name], "count": len(rows), "sheet_id": props[name]["sheetId"],
                          "grid_rows": props[name]["gridProperties"]["rowCount"]} for name,rows in data.items()}
-        return {"targets": targets, "data_hash": fingerprint(data), "sheet_id": settings.SHEET_ID, "create_approval": create_approval}
+        targets[BILL]["rows"], targets[BILL]["added_rows"] = bill_rows, added
+        before = self.values([f"'{BILL}'!A{r}:AD{r}" for r in existing], formulas=True) if existing else []
+        return {"targets": targets, "order_ids": order_ids, "before": before, "existing_rows": existing,
+                "write_key": f"{batch.id}:{getattr(batch,'approved_at',None) or getattr(batch,'revision',0)}",
+                "data_hash": fingerprint(data), "sheet_id": settings.SHEET_ID, "create_approval": create_approval}
 
     def save(self, batch):
-        if self.marker(batch.id):
+        if self.marker(batch):
             return self.verify(batch)
         plan = self.prepare(batch)
         if plan != batch.sheet_plan:
-            raise ReviewRequired("승인 이후 시트의 행 위치가 바뀌었습니다. 금액을 다시 확인하고 승인해 주세요.")
+            raise ReviewRequired("반영 요청 이후 시트 내용이나 행 위치가 바뀌었습니다. 최신 금액을 확인하고 다시 반영해 주세요.")
         data = formula_rows(batch, plan)
         requests = []
         if plan["create_approval"]:
@@ -195,20 +227,22 @@ class Sheets:
             if not rows:
                 continue
             target = plan["targets"][name]
-            end = target["start"] - 1 + len(rows)
-            if end > 14955:
+            row_numbers = positions(target)
+            end = max(row_numbers)
+            if name == BILL and end > 14955:
                 raise DataError("기존 자동 집계 수식의 행 범위를 확장한 후 다시 저장해 주세요.")
             if end > target["grid_rows"]:
                 requests.append({"appendDimension": {"sheetId": target["sheet_id"], "dimension": "ROWS", "length": end - target["grid_rows"]}})
-            if name == BILL and target["start"] > 4:
-                requests.append({"copyPaste": {"source": {"sheetId": target["sheet_id"], "startRowIndex": target["start"]-2,
-                    "endRowIndex": target["start"]-1, "startColumnIndex": 0, "endColumnIndex": len(rows[0])},
-                    "destination": {"sheetId": target["sheet_id"], "startRowIndex": target["start"]-1,
-                    "endRowIndex": end, "startColumnIndex": 0, "endColumnIndex": len(rows[0])}, "pasteType": "PASTE_FORMAT"}})
-            requests.append({"updateCells": {"start": {"sheetId": target["sheet_id"], "rowIndex": target["start"] - 1, "columnIndex": 0},
-                             "rows": [{"values": [cell(v) for v in row]} for row in rows], "fields": "userEnteredValue"}})
+            for rownum, row in zip(row_numbers, rows):
+                if name == BILL and rownum in target.get("added_rows", []) and rownum > 4:
+                    requests.append({"copyPaste": {"source": {"sheetId": target["sheet_id"], "startRowIndex": rownum-2,
+                        "endRowIndex": rownum-1, "startColumnIndex": 0, "endColumnIndex": len(row)},
+                        "destination": {"sheetId": target["sheet_id"], "startRowIndex": rownum-1,
+                        "endRowIndex": rownum, "startColumnIndex": 0, "endColumnIndex": len(row)}, "pasteType": "PASTE_FORMAT"}})
+                requests.append({"updateCells": {"start": {"sheetId": target["sheet_id"], "rowIndex": rownum - 1, "columnIndex": 0},
+                                 "rows": [{"values": [cell(v) for v in row]}], "fields": "userEnteredValue"}})
         requests += [
-            {"createDeveloperMetadata": {"developerMetadata": {"metadataKey": "blcost_batch", "metadataValue": str(batch.id),
+            {"createDeveloperMetadata": {"developerMetadata": {"metadataKey": "blcost_batch", "metadataValue": plan["write_key"],
                 "location": {"spreadsheet": True}, "visibility": "DOCUMENT"}}},
         ]
         # shortcut: 앱 밖에서 원장 끝에 행을 추가하는 작업은 직전 재검사로 감지, 공동 자동 입력이 생기면 전용 입력 원장으로 분리한다.
@@ -216,30 +250,29 @@ class Sheets:
         return self.verify(batch)
 
     def verify(self, batch):
-        if not self.marker(batch.id):
+        if not self.marker(batch):
             raise DataError("저장 완료 표식이 없습니다. 중복 입력하지 않고 확인을 중단했습니다.")
-        data = build_rows(batch)
-        ranges = []
-        names = []
+        data = build_rows(batch, batch.sheet_plan.get("order_ids", ()))
+        ranges, expected = [], []
         for name, rows in data.items():
             if rows:
-                start = batch.sheet_plan["targets"][name]["start"]
                 last = "AD" if name == BILL else "AC"
-                ranges.append(f"'{name}'!A{start}:{last}{start + len(rows) - 1}")
-                names.append(name)
+                for rownum, row in zip(positions(batch.sheet_plan["targets"][name]), rows):
+                    ranges.append(f"'{name}'!A{rownum}:{last}{rownum}")
+                    expected.append(row)
         actual = self.values(ranges)
-        for name, read_rows in zip(names, actual):
-            expected = data[name]
-            if len(read_rows) != len(expected):
+        if len(actual) != len(expected):
+            raise DataError("저장된 행 수가 다릅니다. 완료로 처리하지 않았습니다.")
+        for read_rows, row in zip(actual, expected):
+            if len(read_rows) != 1:
                 raise DataError("저장된 행 수가 다릅니다. 완료로 처리하지 않았습니다.")
-            for a, e in zip(read_rows, expected):
-                for i, value in enumerate(e):
-                    got = a[i] if len(a) > i else None
-                    if value in (None, "") and got in (None, ""):
-                        continue
-                    if isinstance(value, (Decimal, int, float)):
-                        if abs(decimal(got, minimum=Decimal("-1000000000000")) - Decimal(str(value))) > Decimal("0.01"):
-                            raise DataError("시트 저장 금액·수량 검산이 일치하지 않습니다.")
-                    elif got != str(value):
-                        raise DataError("시트 저장 문자·식별번호 검산이 일치하지 않습니다.")
+            for i, value in enumerate(row):
+                got = read_rows[0][i] if len(read_rows[0]) > i else None
+                if value in (None, "") and got in (None, ""):
+                    continue
+                if isinstance(value, (Decimal, int, float)):
+                    if abs(decimal(got, minimum=Decimal("-1000000000000")) - Decimal(str(value))) > Decimal("0.01"):
+                        raise DataError("시트 저장 금액·수량 검산이 일치하지 않습니다.")
+                elif got != str(value):
+                    raise DataError("시트 저장 문자·식별번호 검산이 일치하지 않습니다.")
         return {"verified": True, "targets": batch.sheet_plan["targets"], "spreadsheet_id": settings.SHEET_ID}
