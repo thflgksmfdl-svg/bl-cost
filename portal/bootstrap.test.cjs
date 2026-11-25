@@ -4,6 +4,12 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync(__dirname+'/bl-cost/bootstrap.js','utf8');
 const html='<body data-app-root="/bl-cost"><form id="lookup-form"></form></body>';
+test('report routes do not redirect to the same normalized Netlify path',()=>{
+  for(const line of fs.readFileSync(__dirname+'/_redirects','utf8').trim().split(/\r?\n/)){
+    const [from,to,status]=line.split(/\s+/);
+    if(status==='301'||status==='302')assert.notEqual(from.replace(/\/$/,''),to.replace(/\/$/,''));
+  }
+});
 function run(responses,pathname='/bl-cost/'){
   const elements=Object.fromEntries(['prepare-retry','prepare-title','prepare-help','prepare-countdown','prepare-seconds'].map(id=>['#'+id,{hidden:true,textContent:''}]));
   const calls=[],written=[];

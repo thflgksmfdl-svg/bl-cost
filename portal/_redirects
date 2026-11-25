@@ -1,6 +1,4 @@
 /bl-cost/app https://bl-cost.onrender.com/bl-cost/ 200
-/bl-cost/work-check /bl-cost/work-check/ 301
-/bl-cost/dashboard /bl-cost/dashboard/ 301
 /bl-cost/work-check/ /bl-cost/index.html 200
 /bl-cost/dashboard/ /bl-cost/index.html 200
 /bl-cost/app/work-check https://bl-cost.onrender.com/bl-cost/work-check/ 200
