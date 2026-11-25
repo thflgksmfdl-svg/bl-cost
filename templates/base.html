@@ -5,5 +5,10 @@
 <body data-app-root="{{ app_root }}"><a class="skip" href="#main">본문으로 이동</a>
 <header class="topbar"><div class="container topbar-inner"><a class="wordmark" href="/">{% if app_root %}물류 작업 도구{% else %}bl-cost{% endif %}<span>작업비 정산</span></a>
 <nav aria-label="바로가기"><a href="https://docs.google.com/spreadsheets/d/1t_NcYwbYVcP2JGUJnE2tle8vVuZnyhKMFBPHl_0XwHg/edit#gid=1504460464" target="_blank" rel="noopener noreferrer">공유시트 열기 ↗</a></nav></div></header>
+<nav class="container app-nav" aria-label="정산 메뉴">
+  <a href="{{ app_root }}/"{% if page == 'billing' %} aria-current="page"{% endif %}>고객 청구</a>
+  <a href="{{ app_root }}/work-check/"{% if page == 'work-check' %} aria-current="page"{% endif %}>BL별 작업 검산</a>
+  <a href="{{ app_root }}/dashboard/"{% if page == 'dashboard' %} aria-current="page"{% endif %}>대시보드</a>
+</nav>
 {% block content %}{% endblock %}<footer class="container footer">실제 작업과 청구 결정을 나누어 기록합니다.</footer>
 {% block scripts %}{% endblock %}</body></html>

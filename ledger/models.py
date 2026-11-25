@@ -53,3 +53,18 @@ class LoginAttempt(models.Model):
 
     class Meta:
         db_table = "blcost_login_attempt"
+
+
+class ReportSnapshot(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    state = models.CharField(max_length=20, default="queued")
+    source = models.JSONField(default=dict)
+    data = models.JSONField(default=dict)
+    backup = models.JSONField(default=dict)
+    receipt = models.JSONField(default=dict)
+    error = models.TextField(blank=True)
+    requested_at = models.DateTimeField(default=timezone.now)
+    synced_at = models.DateTimeField(null=True)
+
+    class Meta:
+        db_table = "blcost_report_snapshot"

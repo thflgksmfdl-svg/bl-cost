@@ -6,7 +6,8 @@ from django.utils import timezone
 
 from ledger.domain import DataError, ReviewRequired, assemble, source_fingerprint, summarize
 from ledger.jungpan import Jungpan
-from ledger.models import Audit, Batch
+from ledger.models import Audit, Batch, ReportSnapshot
+from ledger.reports import queue_reports, sync_reports
 from ledger.sheets import Sheets
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ def process(batch):
             batch.revision += 1
             batch.save()
             Audit.objects.create(batch=batch, action="수집 완료", detail={"summary": batch.summary, "source_hash": batch.source_hash})
+        queue_reports()
     else:
         client = Sheets()
         if not client.marker(batch):
@@ -57,6 +59,7 @@ def process(batch):
             batch.revision += 1
             batch.save()
             Audit.objects.create(batch=batch, action="시트 자동 반영 및 검산 완료", detail=batch.sheet_result)
+        queue_reports()
 
 
 class Command(BaseCommand):
@@ -72,6 +75,8 @@ class Command(BaseCommand):
                 time.sleep(2)
         Batch.objects.filter(state="fetching").update(state="queued")
         Batch.objects.filter(state="saving").update(state="approved")
+        ReportSnapshot.objects.get_or_create(pk=1)
+        ReportSnapshot.objects.filter(state="refreshing").update(state="queued")
         while True:
             with transaction.atomic():
                 batch = Batch.objects.select_for_update().filter(state__in=["queued", "approved"]).order_by("created_at").first()
@@ -90,4 +95,13 @@ class Command(BaseCommand):
                     Batch.objects.filter(pk=batch.pk).update(**values)
                     Audit.objects.create(batch=batch, action="처리 오류", detail={"error": message})
             else:
+                report = ReportSnapshot.objects.get(pk=1)
+                due = report.synced_at and (timezone.now() - report.synced_at).total_seconds() >= 600
+                if report.state == "queued" or (report.state == "ready" and due):
+                    try:
+                        sync_reports(Sheets())
+                    except Exception as e:
+                        logger.error("Report sync failed (%s)", type(e).__name__)
+                        message = str(e) if isinstance(e, DataError) else "보고서 갱신을 완료하지 못했습니다. 이전 집계는 보존했습니다. 다시 불러오기를 눌러 주세요."
+                        ReportSnapshot.objects.filter(pk=1).update(state="error", error=message)
                 time.sleep(2)

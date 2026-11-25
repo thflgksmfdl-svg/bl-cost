@@ -11,7 +11,8 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
 from .domain import DataError, calculate, decimal, summarize, review_issues, invoice_message
-from .models import Audit, Batch
+from .models import Audit, Batch, ReportSnapshot
+from .reports import queue_reports
 from .sheets import Sheets
 from .jungpan import tracking_url
 
@@ -72,7 +73,13 @@ def health(request):
 
 @never_cache
 def index(request):
-    return render(request, "index.html", {"app_root": "/bl-cost" if request.path_info.startswith("/bl-cost/") else ""})
+    return render(request, "index.html", {"app_root": "/bl-cost" if request.path_info.startswith("/bl-cost/") else "", "page": "billing"})
+
+
+@never_cache
+@require_GET
+def report_page(request, mode):
+    return render(request, "reports.html", {"app_root": "/bl-cost" if request.path_info.startswith("/bl-cost/") else "", "page": mode})
 
 
 @never_cache
@@ -82,6 +89,17 @@ def status(request):
        "jungpan_configured": all(os.getenv(k) for k in ("JUNGPAN_ADMIN_ID", "JUNGPAN_ADMIN_PW", "JUNGPAN_ADMIN_PWD2")),
        "sheets_configured": bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
        "database_persistent": bool(os.getenv("DATABASE_URL"))})
+
+
+@never_cache
+@require_http_methods(["GET", "POST"])
+def reports(request):
+    snapshot, _ = ReportSnapshot.objects.get_or_create(pk=1)
+    if request.method == "POST":
+        queue_reports()
+        snapshot.refresh_from_db()
+    return JsonResponse({"state": snapshot.state, "data": snapshot.data, "error": snapshot.error,
+        "synced_at": snapshot.synced_at.isoformat() if snapshot.synced_at else None, "receipt": snapshot.receipt})
 
 
 @never_cache
@@ -233,6 +251,8 @@ def batch_action(request, pk, action):
                 raise DataError("지원하지 않는 작업입니다.")
             batch.revision += 1
             batch.save()
+            if action in ("edit", "rules", "refresh"):
+                queue_reports()
         return JsonResponse(serialized(batch, True))
     except Batch.DoesNotExist:
         return JsonResponse({"error": "조회 이력이 없습니다."}, status=404)

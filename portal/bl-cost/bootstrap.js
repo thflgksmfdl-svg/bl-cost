@@ -1,6 +1,7 @@
 "use strict";
 const retry=document.querySelector("#prepare-retry");
 async function prepare(){
+  const view=location.pathname.match(/^\/bl-cost\/(work-check|dashboard)\/?$/)?.[1];
   retry.hidden=true;
   const countdown=document.querySelector("#prepare-countdown"),seconds=document.querySelector("#prepare-seconds");
   countdown.hidden=false;
@@ -18,9 +19,9 @@ async function prepare(){
   },1000);
   for(let attempt=0;attempt<4;attempt++){
     try{
-      const response=await fetch("/bl-cost/app"+location.search,{cache:"no-store",signal:AbortSignal.timeout(30000)});
+      const response=await fetch("/bl-cost/app"+(view?"/"+view:"")+location.search,{cache:"no-store",signal:AbortSignal.timeout(30000)});
       const html=await response.text();
-      if(!response.ok||!html.includes('data-app-root="/bl-cost"')||!html.includes('id="lookup-form"'))throw Error("not-ready");
+      if(!response.ok||!html.includes('data-app-root="/bl-cost"')||!html.includes(view?`data-report-page="${view}"`:'id="lookup-form"'))throw Error("not-ready");
       clearInterval(timer);
       document.open();document.write(html);document.close();return;
     }catch{if(attempt<3)await new Promise(resolve=>setTimeout(resolve,1500));}

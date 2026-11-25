@@ -146,6 +146,143 @@ class Sheets:
     def metadata(self):
         return self.call("GET", params={"fields": "spreadsheetId,sheets(properties),developerMetadata"})
 
+    def report_source(self):
+        from .reports import legacy_source
+        props = {s["properties"]["title"]: s["properties"] for s in self.metadata()["sheets"]}
+        required = ("BL별 작업 검산", "대시보드", "원가 정산", BILL)
+        if any(name not in props for name in required):
+            raise DataError("보고서에 필요한 기존 공유시트 탭이 없습니다.")
+        end = props["BL별 작업 검산"]["gridProperties"]["rowCount"]
+        cost_end, bill_end = (props[n]["gridProperties"]["rowCount"] for n in ("원가 정산", BILL))
+        if end < 510 or cost_end > 100000 or bill_end > 100000:
+            raise DataError("기존 보고서의 집계 범위가 바뀌었습니다. 범위를 확인해 주세요.")
+        values = self.values(["'BL별 작업 검산'!P8:X500", "'BL별 작업 검산'!Y8:AF507",
+            f"'원가 정산'!B4:B{cost_end}", f"'원가 정산'!AD4:AD{cost_end}",
+            f"'{BILL}'!B4:B{bill_end}", f"'{BILL}'!Z4:AB{bill_end}"])
+        if len(values[0]) == 493 or len(values[1]) == 500:
+            raise DataError("과거 BL 집계 범위가 가득 찼습니다. 원본 집계 범위를 확장해 주세요.")
+        return legacy_source(*values)
+
+    def report_backup(self):
+        ranges = ["'BL별 작업 검산'!A1:M510", "'대시보드'!A1:L300"]
+        return {"ranges": ranges, "formulas": self.values(ranges, formulas=True)}
+
+    def save_reports(self, report):
+        from .reports import SUMMARY_HEADERS, SUMMARY_SHEET, WORK
+        props = {s["properties"]["title"]: s["properties"] for s in self.metadata()["sheets"]}
+        requests = []
+        if SUMMARY_SHEET not in props:
+            used = {p["sheetId"] for p in props.values()}
+            sid = next(i for i in range(1349874000, 1349874100) if i not in used)
+            props[SUMMARY_SHEET] = {"sheetId": sid, "gridProperties": {"rowCount": max(1000, len(report["rows"])+1), "columnCount": 28}}
+            requests.append({"addSheet": {"properties": {**props[SUMMARY_SHEET], "title": SUMMARY_SHEET}}})
+        else:
+            headers = self.values([f"'{SUMMARY_SHEET}'!A1:AB1"])
+            if not headers or not headers[0] or headers[0][0] != SUMMARY_HEADERS:
+                raise DataError("시스템 집계의 열 구조가 바뀌었습니다. 기존 자료를 보호하기 위해 저장을 중단했습니다.")
+        sid = props[SUMMARY_SHEET]["sheetId"]
+        check_id, dashboard_id = (props[n]["sheetId"] for n in ("BL별 작업 검산", "대시보드"))
+        data, check = [], []
+        for i, r in enumerate(report["rows"], 2):
+            w = r["work"]
+            nums = lambda *keys: [decimal(w[k]) for k in keys]
+            data.append([r["bl"], r["month"], r["source"], r["orders"], r["products"], *nums(*WORK[:5]),
+                Formula(f"=SUM(G{i}:J{i})"), *nums(*WORK[5:]), Formula(f"=SUM(L{i}:M{i})"), r["verification"],
+                " · ".join(r["differences"]), r["invoice_count"], decimal(r["invoice_total"]), r["pending"],
+                *[decimal(r[k]) for k in ("paid", "unpaid", "unknown", "held")], decimal(r["cost"]) if r["cost"] is not None else None,
+                r["cost_basis"], r["source_at"], r["sheet_check"], Decimal(r["sheet_difference"])])
+            if r["source"] == "청구 시트만 존재":
+                data[-1][4:14] = ["미확인"]*10
+            ref = lambda c: Formula(f"='{SUMMARY_SHEET}'!{c}{i}")
+            check.append([ref(c) for c in ("A", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O")] +
+                         [f"{r['source']} / " + (" · ".join(r["differences"]) or "추가 확인사항 없음")])
+
+        def write(sheet_id, row, col, values, clear_to=None):
+            if clear_to is not None:
+                requests.append({"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": row, "endRowIndex": clear_to,
+                    "startColumnIndex": col, "endColumnIndex": col+len(values[0])}, "rows": [], "fields": "userEnteredValue"}})
+            requests.append({"updateCells": {"start": {"sheetId": sheet_id, "rowIndex": row, "columnIndex": col},
+                "rows": [{"values": [cell(v) for v in line]} for line in values], "fields": "userEnteredValue"}})
+
+        if len(data)+1 > props[SUMMARY_SHEET]["gridProperties"]["rowCount"]:
+            requests.append({"appendDimension": {"sheetId": sid, "dimension": "ROWS", "length": len(data)+1-props[SUMMARY_SHEET]["gridProperties"]["rowCount"]}})
+        write(sid, 0, 0, [SUMMARY_HEADERS]+data, props[SUMMARY_SHEET]["gridProperties"]["rowCount"])
+        check_end = max(props["BL별 작업 검산"]["gridProperties"]["rowCount"], len(check)+7)
+        if check_end > props["BL별 작업 검산"]["gridProperties"]["rowCount"]:
+            requests.append({"appendDimension": {"sheetId": check_id, "dimension": "ROWS", "length": check_end-props["BL별 작업 검산"]["gridProperties"]["rowCount"]}})
+        write(check_id, 6, 0, [["BL 번호", "상품 행", "실제 작업시간(h)", "인쇄스티커", "스티커", "바코드", "벌크작업", "4종 합계", "재봉", "도장", "재봉·도장 합계", "검산 상태", "차이 항목 / 확인사항"]]+check, check_end)
+        write(check_id, 1, 0, [["전체 작업 포함 · 중판 조회값 우선 · 기존 자료와의 차이는 확인사항에 표시 · 원본 집계 P:AF 보존"]])
+        ref = lambda c: f"'{SUMMARY_SHEET}'!{c}2:{c}"
+        for col, value in [(0, Formula(f"=COUNTA({ref('A')})")), (2, Formula(f'=TEXT(SUM({ref("F")}),"#,##0.##")&"시간"')),
+            (4, Formula(f'=TEXT(SUM({ref("K")}),"#,##0")&"개"')), (8, Formula(f'=TEXT(SUM({ref("N")}),"#,##0")&"개"')),
+            (11, Formula(f'=COUNTIF({ref("P")},"?*")&" BL"'))]:
+            write(check_id, 3, col, [[value]])
+        write(check_id, 2, 11, [["차이 확인 필요"]])
+        write(check_id, 5, 11, [["수집 원본·DB 대조"]])
+        write(dashboard_id, 0, 0, [["작업·확정 청구 대시보드"]])
+        write(dashboard_id, 2, 0, [["핵심 지표", "집계값"], ["참고 원가", Formula(f'=IF(COUNTA({ref("A")})=0,0,IF(COUNT({ref("X")})=0,"미확인",SUM({ref("X")})))')],
+            ["확정 고객 청구", Formula(f"=SUM({ref('R')})")], ["원가·마진 기준", "기존 원가와 추정 원가 포함 · 실제 마진은 미산출"],
+            ["입금 기록액", Formula(f"=SUM({ref('T')})")], ["미결제 기록액", Formula(f"=SUM({ref('U')})")],
+            ["결제상태 미입력액", Formula(f"=SUM({ref('V')})")]])
+        months = []
+        for i, m in enumerate(report["months"], 4):
+            criterion = f"D{i}"
+            months.append([m["month"], Formula(f"=COUNTIF({ref('B')},{criterion})")] +
+                [Formula(f'=IF(COUNTIFS({ref("B")},{criterion},{ref(c)},"<>")=0,"미확인",SUMIF({ref("B")},{criterion},{ref(c)}))') if c in ("S", "F", "X") else
+                 Formula(f"=SUMIF({ref('B')},{criterion},{ref(c)})") for c in ("F", "Q", "R", "T", "V", "S", "X")])
+        write(dashboard_id, 2, 3, [["작업월", "BL 수", "실제 시간(h)", "확정 청구 건", "확정 청구액", "입금 기록액", "상태 미입력액", "추가 결정 대기", "참고 원가"]]+months, max(15, len(months)+3))
+        write(dashboard_id, 13, 1, [["10개까지 무료 / 11개째부터 초과분 청구"]])
+        write(dashboard_id, 16, 0, [["입금은 청구 입력의 결제완료 기록 기준입니다. 빈 결제상태는 미결제로 간주하지 않습니다."]])
+        write(dashboard_id, 17, 0, [["작업월 기준 집계입니다. 과거 시트의 추가 비용 결정 여부는 확인되지 않았습니다."]])
+        for target, header_row, columns in [(sid, 0, 28), (dashboard_id, 2, 12)]:
+            requests.append({"repeatCell": {"range": {"sheetId": target, "startRowIndex": header_row, "endRowIndex": header_row+1,
+                "startColumnIndex": 0 if target == sid else 3, "endColumnIndex": columns}, "cell": {"userEnteredFormat": {
+                "backgroundColor": {"red": .85, "green": .94, "blue": .89}, "textFormat": {"bold": True}, "wrapStrategy": "WRAP"}},
+                "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.wrapStrategy"}})
+        requests.append({"updateSheetProperties": {"properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}})
+        for first, last, pattern in [(4, 7, "#,##0.##"), (7, 10, '#,##0"원"'), (10, 11, "#,##0"), (11, 12, '#,##0"원"')]:
+            requests.append({"repeatCell": {"range": {"sheetId": dashboard_id, "startRowIndex": 3, "endRowIndex": max(15, len(months)+3),
+                "startColumnIndex": first, "endColumnIndex": last}, "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pattern}}}, "fields": "userEnteredFormat.numberFormat"}})
+        requests.append({"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": len(data)+1},
+            "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP", "verticalAlignment": "TOP"}}, "fields": "userEnteredFormat.wrapStrategy,userEnteredFormat.verticalAlignment"}})
+        for first, last, width in [(0, 1, 130), (1, 2, 110), (2, 3, 140), (3, 14, 95), (14, 16, 250), (16, 24, 130), (24, 28, 260)]:
+            requests.append({"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": first, "endIndex": last}, "properties": {"pixelSize": width}, "fields": "pixelSize"}})
+        requests.append({"updateDimensionProperties": {"range": {"sheetId": dashboard_id, "dimension": "COLUMNS", "startIndex": 3, "endIndex": 12}, "properties": {"pixelSize": 135}, "fields": "pixelSize"}})
+        self.call("POST", ":batchUpdate", json={"requests": requests})
+        actual = self.values([f"'{SUMMARY_SHEET}'!A2:AB{max(2,len(data)+1)}", "'대시보드'!B4:B5", f"'BL별 작업 검산'!A8:M{max(8,len(check)+7)}", f"'대시보드'!D4:L{max(4,len(months)+3)}"])
+        cost_total = "미확인" if data and report["totals"]["cost_missing"] == len(data) else decimal(report["totals"]["cost"])
+        expected = [[list(row) for row in data], [[cost_total], [decimal(report["totals"]["invoice_total"])]], [], []]
+        if len(actual) != len(expected):
+            raise DataError("보고서 저장 결과의 범위 수가 다릅니다.")
+        for row, r in zip(expected[0], report["rows"]):
+            row[10], row[13] = decimal(r["four_total"]), decimal(r["two_total"])
+            if r["source"] == "청구 시트만 존재":
+                row[4:14] = ["미확인"]*10
+            expected[2].append([r["bl"], r["products"], *[decimal(r["work"][k]) for k in WORK[:5]], decimal(r["four_total"]),
+                *[decimal(r["work"][k]) for k in WORK[5:]], decimal(r["two_total"]), r["verification"],
+                f"{r['source']} / " + (" · ".join(r["differences"]) or "추가 확인사항 없음")])
+            if r["source"] == "청구 시트만 존재":
+                expected[2][-1][1:11] = ["미확인"]*10
+        for m in report["months"]:
+            expected[3].append([m["month"], m["bl_count"], "미확인" if m["work_missing"] == m["bl_count"] else decimal(m["work"]["작업시간"]),
+                m["invoice_count"], decimal(m["invoice_total"]), decimal(m["paid"]), decimal(m["unknown"]),
+                "미확인" if m["pending_unknown"] == m["bl_count"] else m["pending"], "미확인" if m["cost_missing"] == m["bl_count"] else decimal(m["cost"])])
+        for got_rows, want_rows in zip(actual, expected):
+            if len(got_rows) != len(want_rows):
+                raise DataError("보고서 저장 행 수가 일치하지 않습니다.")
+            for got, want in zip(got_rows, want_rows):
+                for i, value in enumerate(want):
+                    read = got[i] if len(got) > i else ""
+                    if value in (None, "") and read in (None, ""):
+                        continue
+                    if isinstance(value, (Decimal, int, float)):
+                        if abs(Decimal(str(read)) - Decimal(str(value))) > Decimal(".01"):
+                            raise DataError("사이트·시트 보고서 수량 또는 금액이 다릅니다.")
+                    elif str(read) != str(value):
+                        raise DataError("사이트·시트 보고서 문자 또는 식별번호가 다릅니다.")
+        return {"verified": True, "spreadsheet_id": settings.SHEET_ID, "summary_sheet_id": sid,
+            "check_sheet_id": check_id, "dashboard_sheet_id": dashboard_id, "bl_count": len(data), "data_hash": fingerprint(report)}
+
     def marker(self, batch, metadata=None):
         data = metadata if metadata is not None else self.metadata()
         key = batch.sheet_plan.get("write_key", str(batch.id))

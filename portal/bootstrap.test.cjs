@@ -4,17 +4,27 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync(__dirname+'/bl-cost/bootstrap.js','utf8');
 const html='<body data-app-root="/bl-cost"><form id="lookup-form"></form></body>';
-function run(responses){
+function run(responses,pathname='/bl-cost/'){
   const elements=Object.fromEntries(['prepare-retry','prepare-title','prepare-help','prepare-countdown','prepare-seconds'].map(id=>['#'+id,{hidden:true,textContent:''}]));
   const calls=[],written=[];
   let now=0,nextTimer=1;
   const timers=new Map();
-  const context={document:{querySelector:id=>elements[id],open(){},write:value=>written.push(value),close(){}},location:{search:'?batch=example'},AbortSignal,
+  const context={document:{querySelector:id=>elements[id],open(){},write:value=>written.push(value),close(){}},location:{pathname,search:'?batch=example'},AbortSignal,
     Date:{now:()=>now},setInterval:fn=>{const id=nextTimer++;timers.set(id,fn);return id;},clearInterval:id=>timers.delete(id),
     setTimeout:fn=>queueMicrotask(fn),fetch:async(url,options)=>{calls.push({url,options});return responses.shift()||{ok:false,text:async()=>''};}};
   vm.runInNewContext(source,context);
   return {elements,calls,written,timers,advance:ms=>{now+=ms;for(const fn of [...timers.values()])fn();}};
 }
+
+test('reports open their own same-origin page through the warm-up screen',async()=>{
+  for(const view of ['work-check','dashboard']){
+    const page=`<body data-app-root="/bl-cost"><main data-report-page="${view}"></main></body>`;
+    const r=run([{ok:true,text:async()=>page}],`/bl-cost/${view}/`);
+    await new Promise(setImmediate);
+    assert.equal(r.calls[0].url,`/bl-cost/app/${view}?batch=example`);
+    assert.deepEqual(r.written,[page]);
+  }
+});
 test('cold or temporarily unavailable server retries before opening the same-page app',async()=>{
   const r=run([{ok:false,text:async()=>''},{ok:true,text:async()=>html}]);
   await new Promise(setImmediate);
