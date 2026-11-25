@@ -1,5 +1,6 @@
 "use strict";
 const $ = (selector) => document.querySelector(selector);
+const appRoot = document.body.dataset.appRoot || "";
 const money = (v) => `${Number(v || 0).toLocaleString("ko-KR", {maximumFractionDigits:0})}원`;
 const qty = (v) => Number(v || 0).toLocaleString("ko-KR", {maximumFractionDigits:3});
 const labels={queued:"조회 대기",fetching:"중판 조회 중",review:"계산 완료",approved:"시트 반영 대기",saving:"시트 반영 중",saved:"시트 반영 완료",error:"처리 확인 필요"};
@@ -10,7 +11,7 @@ function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefi
 function notice(text){for(const selector of ["#notice","#save-error"]){$(selector).hidden=!text;$(selector).textContent=text||"";}}
 function busy(button,value){if(value){button.dataset.idleLabel=button.textContent;button.textContent=button.id==="lookup-button"?"조회 요청 중…":"처리 중…";}else if(button.dataset.idleLabel){button.textContent=button.dataset.idleLabel;delete button.dataset.idleLabel;}button.disabled=value;button.setAttribute("aria-busy",String(value));}
 async function api(url,data){
-  const response=await fetch(url,data===undefined?{cache:"no-store"}:{method:"POST",headers:{"Content-Type":"application/json","X-CSRFToken":$("input[name=csrfmiddlewaretoken]").value},body:JSON.stringify(data),cache:"no-store"});
+  const response=await fetch(appRoot+url,data===undefined?{cache:"no-store"}:{method:"POST",headers:{"Content-Type":"application/json","X-CSRFToken":$("input[name=csrfmiddlewaretoken]").value},body:JSON.stringify(data),cache:"no-store"});
   if(response.redirected){location.assign("/login/");throw Error("다시 로그인해 주세요.");}
   let result;try{result=await response.json();}catch{throw Error("서버 응답을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.");}
   if(!response.ok)throw Error(result.error||"요청을 처리하지 못했습니다.");return result;

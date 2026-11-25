@@ -1,0 +1,3 @@
+/bl-cost/app https://bl-cost.onrender.com/bl-cost/ 200
+/bl-cost/api/* https://bl-cost.onrender.com/bl-cost/api/:splat 200
+/bl-cost/static/* https://bl-cost.onrender.com/static/:splat 200

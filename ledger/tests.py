@@ -7,6 +7,7 @@ from urllib.parse import urlparse, parse_qs
 
 from django.contrib.auth import get_user_model
 from django.test import Client, SimpleTestCase, TestCase
+from django.templatetags.static import static
 from .domain import DataError, ReviewRequired, assemble, calculate, decimal, first_work, packaging, summarize, review_issues, source_fingerprint, invoice_message, fingerprint
 from .jungpan import parse_child, parse_parent, parse_products, tracking_url
 from .models import Batch
@@ -241,6 +242,27 @@ class WorkflowTests(TestCase):
         self.assertEqual([l["tracking"] for l in links],["753560928","79049245784592"])
         for link in links:
             self.assertEqual(parse_qs(urlparse(link["url"]).query)["shChTrkNo"],[link["tracking"]])
+
+    def test_portal_mount_keeps_page_assets_and_api_under_its_path(self):
+        r=self.client.get("/bl-cost/")
+        self.assertContains(r,'data-app-root="/bl-cost"')
+        self.assertContains(r,f'href="/bl-cost{static("app.css")}"')
+        self.assertContains(r,f'src="/bl-cost{static("app.js")}"')
+        self.assertContains(r,"물류 작업 도구")
+        data=self.client.get(f"/bl-cost/api/batches/{self.batch.id}/").json()
+        self.assertEqual(data["bl"],self.batch.bl)
+        self.assertContains(self.client.get("/"),'data-app-root=""')
+
+    def test_portal_preview_accepts_its_csrf_origin_and_rejects_untrusted_sites(self):
+        client=Client(enforce_csrf_checks=True,HTTP_X_FORWARDED_PROTO="https")
+        client.get("/bl-cost/")
+        token=client.cookies["csrftoken"].value
+        data=json.dumps({"revision":0,"order_id":"17974","changes":{"extra_hours":"0.5","reason":"OPP"}})
+        url=f"/bl-cost/api/batches/{self.batch.id}/preview/"
+        r=client.post(url,data,content_type="application/json",HTTP_X_CSRFTOKEN=token,HTTP_ORIGIN="https://jp-pack.netlify.app")
+        self.assertEqual(r.status_code,200)
+        self.assertEqual(r.json()["calculation"]["total"],"8250")
+        self.assertEqual(client.post(url,data,content_type="application/json",HTTP_X_CSRFTOKEN=token,HTTP_ORIGIN="https://unknown.netlify.app").status_code,403)
 
     def test_existing_draft_reclassifies_without_overwriting_source_or_decisions(self):
         o=self.batch.orders[0]

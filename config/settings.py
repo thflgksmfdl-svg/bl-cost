@@ -6,10 +6,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 PRODUCTION = os.getenv("RENDER") == "true"
 SECRET_KEY = os.getenv("SECRET_KEY", "local-development-only-not-a-production-secret")
 DEBUG = not PRODUCTION and os.getenv("DEBUG", "1") == "1"
-ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver", "bl-cost.onrender.com"]
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver", "bl-cost.onrender.com", "jp-pack.netlify.app"]
 if os.getenv("RENDER_EXTERNAL_HOSTNAME"):
     ALLOWED_HOSTS.append(os.environ["RENDER_EXTERNAL_HOSTNAME"])
-CSRF_TRUSTED_ORIGINS = [f"https://{h}" for h in ALLOWED_HOSTS if h.endswith(".onrender.com")]
+CSRF_TRUSTED_ORIGINS = [f"https://{h}" for h in ALLOWED_HOSTS if h.endswith((".onrender.com", "jp-pack.netlify.app"))]
 INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles", "ledger",

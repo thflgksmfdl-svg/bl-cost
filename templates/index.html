@@ -29,4 +29,4 @@
   <div><strong>조회 요청을 보냈어요</strong><p>잠시만 기다려 주세요. 진행 상황은 아래에 표시돼요.</p></div>
 </aside>
 <noscript><p class="container notice">고객 청구 화면을 사용하려면 JavaScript를 켜 주세요.</p></noscript>{% endblock %}
-{% block scripts %}<script src="{% static 'app.js' %}" defer></script>{% endblock %}
+{% block scripts %}<script src="{{ app_root }}{% static 'app.js' %}" defer></script>{% endblock %}

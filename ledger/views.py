@@ -72,7 +72,7 @@ def health(request):
 
 @never_cache
 def index(request):
-    return render(request, "index.html")
+    return render(request, "index.html", {"app_root": "/bl-cost" if request.path_info.startswith("/bl-cost/") else ""})
 
 
 @never_cache
