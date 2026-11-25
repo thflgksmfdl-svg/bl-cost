@@ -73,3 +73,12 @@ test('security failures show the server recovery message instead of a response p
   r.run(`fetch=async()=>({ok:false,status:403,redirected:false,json:async()=>({error:"보안 확인에 실패해 요청을 처리하지 못했습니다. 입력한 내용을 보관한 뒤 화면을 새로고침하고 다시 시도해 주세요."})})`);
   await assert.rejects(r.run('api("/api/batches/example/preview/",{})'),/보안 확인.*새로고침/);
 });
+
+test('duplicate charge prompts are removed while information corrections remain visible',()=>{
+  const r=setup(saved());
+  const issues=[{kind:'opp',text:'OPP 봉투 500개 사용'},{kind:'cost',text:'별도 비용 안내'},
+    {kind:'quantity',text:'수량 확인'},{kind:'free_hours',text:'무료시간 확인'},
+    {kind:'customer',text:'고객명 확인'},{kind:'mode',text:'입고방식 확인'},{kind:'future-warning',text:'추가 확인'}];
+  const visible=JSON.parse(r.run('JSON.stringify(correctionIssues('+JSON.stringify({review_issues:issues})+'))'));
+  assert.deepEqual(visible.map(i=>i.text),['수량 확인','무료시간 확인','고객명 확인','입고방식 확인','추가 확인']);
+});

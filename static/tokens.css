@@ -16,7 +16,7 @@
   --p-mon: oklch(85% 0.052 22); --p-tue: oklch(87.5% 0.058 64); --p-wed: oklch(91.5% 0.064 98); --p-thu: oklch(86.5% 0.075 160);
   --p-fri: oklch(87% 0.048 210); --p-sat: oklch(84% 0.045 270); --p-sun: oklch(84% 0.048 322);
   --light: oklch(99.4% 0.016 84); --glint: oklch(100% 0 0);
-  --font-display: var(--font-body); --font-body: "Malgun Gothic", system-ui, sans-serif;
+  --font-display: var(--font-body); --font-body: "Pretendard Variable", Pretendard, "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
   --font-outlier: var(--font-body);
   --radius-card: 14px; --radius-input: 10px; --radius-pill: 999px; --rule-hair: 1px;
   --shadow-card: 0 1px 2px oklch(30% 0.03 165 / 0.08), 0 24px 48px -24px oklch(40% 0.08 165 / 0.35);

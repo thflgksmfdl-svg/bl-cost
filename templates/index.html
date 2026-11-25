@@ -16,13 +16,26 @@
   </div></section>
 </main>
 <dialog id="review-dialog" aria-labelledby="review-title"><form id="review-form">
-  <div class="dialog-heading"><div><h2 id="review-title">추가 비용 결정</h2><p id="review-subtitle" class="muted"></p></div><button type="button" class="quiet" id="close-dialog">닫기</button></div>
-  <div class="dialog-body"><p id="review-question" class="review-question"></p><div class="source-facts"><dl><div><dt>중판 주문금액</dt><dd id="review-amount"></dd></div><div><dt>기본 청구금액</dt><dd id="review-base"></dd></div></dl><h3>입고오류메시지</h3><p id="review-memo" class="memo"></p></div>
-  <div id="review-source-links" class="source-links"></div><ul id="review-decisions" class="review-decisions"></ul><p id="review-included" class="help"></p>
-  <div class="form-grid corrections"><label id="customer-field" hidden>고객명<input name="customer" maxlength="200"></label><label id="mode-field" hidden>입고방식<select name="mode"><option value="">선택하세요</option><option value="직접수령">직접수령</option><option value="로켓그로스">로켓그로스</option></select></label><label id="opp-field" hidden>opp 실사용량<input name="opp" type="number" min="0" step="1"></label><label id="boxes-field" hidden>박스 실사용량<input name="boxes" type="number" min="0" step="1"></label><label id="free-hours-field" hidden>적용할 무료시간<input name="free_hours_override" type="number" min="0" step="0.1"></label></div>
-  <div class="form-grid"><label>추가 청구시간<input name="extra_hours" type="number" min="0" step="0.1" value="0"></label><label>별도 추가금액 (원, 부가세 포함)<input name="extra_amount" type="number" min="0" step="1" value="0"></label></div><p class="help">실제 작업시간은 바뀌지 않습니다. 같은 비용을 시간과 금액에 중복 입력하지 마세요.</p><label>청구 사유<textarea name="reason" rows="2" maxlength="1000"></textarea></label>
-  <div class="price-preview" aria-live="polite"><div><span>기본 청구</span><strong id="preview-base"></strong></div><div><span>추가시간 비용</span><strong id="preview-time"></strong></div><div><span>별도 추가금액</span><strong id="preview-extra"></strong></div><div class="price-total"><span>최종 청구금액</span><strong id="preview-total"></strong></div></div><p id="review-error" class="help" role="alert"></p></div>
-  <div class="dialog-footer"><button id="review-decline" class="quiet" type="button">추가 없이 확정</button><button id="review-save" class="primary" type="submit">추가 청구 반영</button></div>
+  <div class="dialog-heading"><div><h2 id="review-title">추가 비용 결정</h2><p id="review-subtitle"></p><p id="review-order" class="identifier"></p></div><button type="button" class="quiet" id="close-dialog">닫기</button></div>
+  <div class="dialog-body"><div class="review-layout">
+    <section class="review-context" aria-labelledby="review-memo-heading">
+      <div class="memo-heading"><div><span class="source-label">중판 원문</span><h3 id="review-memo-heading">입고오류메시지</h3></div><div id="review-source-links" class="source-links"></div></div>
+      <p id="review-memo" class="memo"></p>
+      <dl class="source-facts"><div><dt>중판 주문금액</dt><dd id="review-amount"></dd></div><div><dt>기본 청구금액</dt><dd id="review-base"></dd></div></dl>
+      <p id="review-included" class="help" hidden></p>
+    </section>
+    <section class="review-entry" aria-labelledby="review-entry-heading">
+      <h3 id="review-entry-heading">추가 청구</h3><p id="review-question" class="review-question"></p>
+      <ul id="review-decisions" class="review-decisions" hidden></ul>
+      <div class="form-grid corrections"><label id="customer-field" hidden>고객명<input name="customer" maxlength="200"></label><label id="mode-field" hidden>입고방식<select name="mode"><option value="">선택하세요</option><option value="직접수령">직접수령</option><option value="로켓그로스">로켓그로스</option></select></label><label id="opp-field" hidden>opp 실사용량<input name="opp" type="number" min="0" step="1"></label><label id="boxes-field" hidden>박스 실사용량<input name="boxes" type="number" min="0" step="1"></label><label id="free-hours-field" hidden>적용할 무료시간<input name="free_hours_override" type="number" min="0" step="0.1"></label></div>
+      <div class="form-grid charge-fields"><div><label for="extra-hours">추가 청구시간</label><div class="unit-input"><input id="extra-hours" name="extra_hours" type="number" min="0" step="0.1" value="0" aria-describedby="charge-input-help"><span aria-hidden="true">시간</span></div></div><div><label for="extra-amount">별도 추가금액 <span class="visually-hidden">(원)</span><span class="field-note">VAT 포함</span></label><div class="unit-input"><input id="extra-amount" name="extra_amount" type="number" min="0" step="1" value="0" aria-describedby="charge-input-help"><span aria-hidden="true">원</span></div></div></div>
+      <p id="charge-input-help" class="help">같은 비용을 시간과 금액에 중복 입력하지 마세요.</p>
+      <label for="charge-reason" class="reason-label">청구 사유</label><textarea id="charge-reason" name="reason" rows="3" maxlength="1000" placeholder="추가 비용의 사유를 남겨 주세요."></textarea>
+      <dl class="price-preview" aria-live="polite"><div><dt>기본 청구</dt><dd id="preview-base"></dd></div><div><dt>추가시간 비용</dt><dd id="preview-time"></dd></div><div><dt>별도 추가금액</dt><dd id="preview-extra"></dd></div></dl>
+      <p id="review-error" class="help" role="alert"></p>
+    </section>
+  </div></div>
+  <div class="dialog-footer"><div class="review-total" aria-live="polite"><div><span>최종 청구금액</span><small>VAT 포함 · 10원 미만 절사</small></div><strong id="preview-total"></strong></div><div class="review-footer-actions"><button id="review-decline" class="quiet" type="button">추가 없이 확정</button><button id="review-save" class="primary" type="submit">추가 청구 반영</button></div></div>
 </form></dialog>
 <aside id="lookup-toast" class="lookup-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
   <img data-src="{{ app_root }}{% static 'bunny-working.svg' %}" width="80" height="88" alt="" aria-hidden="true">
