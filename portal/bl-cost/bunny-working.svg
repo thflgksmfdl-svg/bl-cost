@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 106" fill="none">
+  <style>
+    .ear-left,.ear-right,.head,.eyes,.paw { transform-box:fill-box; }
+    .ear-left { transform-origin:50% 95%; animation:ear-left 4.8s ease-in-out infinite; }
+    .ear-right { transform-origin:50% 95%; animation:ear-right 4.8s ease-in-out infinite; }
+    .head { transform-origin:50% 90%; animation:nod 4.8s ease-in-out infinite; }
+    .eyes { transform-origin:center; animation:blink 4.8s ease-in-out infinite; }
+    .paw { transform-origin:50% 60%; animation:check 2.4s ease-in-out infinite; }
+    @keyframes ear-left { 0%,48%,74%,100% { transform:rotate(0); } 56% { transform:rotate(-9deg); } 64% { transform:rotate(3deg); } }
+    @keyframes ear-right { 0%,52%,80%,100% { transform:rotate(0); } 62% { transform:rotate(8deg); } 70% { transform:rotate(-2deg); } }
+    @keyframes nod { 0%,38%,82%,100% { transform:rotate(0); } 58% { transform:translateY(1px) rotate(-3deg); } }
+    @keyframes blink { 0%,31%,35%,83%,87%,100% { transform:scaleY(1); } 33%,85% { transform:scaleY(.12); } }
+    @keyframes check { 0%,18%,68%,100% { transform:translate(0,0) rotate(0); } 34%,52% { transform:translate(1px,2px) rotate(7deg); } 43% { transform:translate(0,0) rotate(2deg); } }
+    @media(prefers-reduced-motion:reduce) { .ear-left,.ear-right,.head,.eyes,.paw { animation:none; } }
+  </style>
+  <ellipse cx="48" cy="99" rx="31" ry="4" fill="#DDEBE0"/>
+  <path d="M28 82C26 66 33 58 48 58S70 67 68 83L64 96H32Z" fill="#FFF9EE" stroke="#805B49" stroke-width="2"/>
+  <ellipse cx="32" cy="96" rx="10" ry="4" fill="#FFF9EE" stroke="#805B49" stroke-width="2"/>
+  <ellipse cx="64" cy="96" rx="10" ry="4" fill="#FFF9EE" stroke="#805B49" stroke-width="2"/>
+  <g class="head">
+    <g class="ear-left">
+      <path d="M30 38C20 21 24 5 31 5C38 5 42 24 40 39" fill="#FFF9EE" stroke="#805B49" stroke-width="2.2" stroke-linecap="round"/>
+      <path d="M31 13C28 17 30 28 34 33" stroke="#F1B9AD" stroke-width="5" stroke-linecap="round"/>
+    </g>
+    <g class="ear-right">
+      <path d="M54 37C52 21 59 3 66 6C74 10 69 27 63 40" fill="#FFF9EE" stroke="#805B49" stroke-width="2.2" stroke-linecap="round"/>
+      <path d="M64 14C64 20 61 27 59 31" stroke="#F1B9AD" stroke-width="5" stroke-linecap="round"/>
+    </g>
+    <path d="M21 49C21 34 31 28 48 28S75 35 75 49C75 64 64 70 48 70S21 64 21 49Z" fill="#FFF9EE" stroke="#805B49" stroke-width="2.2"/>
+    <ellipse cx="31" cy="55" rx="6" ry="3.5" fill="#F5C8BA"/>
+    <ellipse cx="65" cy="55" rx="6" ry="3.5" fill="#F5C8BA"/>
+    <g class="eyes" fill="#674B3C"><ellipse cx="37" cy="48" rx="2.2" ry="3"/><ellipse cx="59" cy="48" rx="2.2" ry="3"/></g>
+    <path d="M45 53Q48 50 51 53L48 56Z" fill="#B77C72"/>
+    <path d="M48 56C46 60 43 58 43 57M48 56C50 60 53 58 53 57" stroke="#805B49" stroke-width="1.7" stroke-linecap="round"/>
+  </g>
+  <path d="M35 75H61V98L57 96L53 98L49 96L45 98L41 96L35 98Z" fill="#F0F7ED" stroke="#6B8E78" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M41 82H55M41 87H49" stroke="#A5BDA8" stroke-width="2" stroke-linecap="round"/>
+  <path d="M48 91L51 94L57 88" stroke="#367555" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <ellipse cx="34" cy="78" rx="7" ry="5" fill="#FFF9EE" stroke="#805B49" stroke-width="2" transform="rotate(-22 34 78)"/>
+  <g class="paw"><path d="M66 72C73 73 71 83 66 83C60 82 59 75 66 72Z" fill="#FFF9EE" stroke="#805B49" stroke-width="2"/><path d="M62 79L55 87" stroke="#805B49" stroke-width="2.5" stroke-linecap="round"/></g>
+</svg>

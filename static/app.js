@@ -6,7 +6,14 @@ const qty = (v) => Number(v || 0).toLocaleString("ko-KR", {maximumFractionDigits
 const labels={queued:"조회 대기",fetching:"중판 조회 중",review:"추가 비용 결정",approved:"시트 자동 반영 대기",saving:"시트 자동 반영 중",saved:"시트 자동 반영 완료",error:"처리 확인 필요"};
 const state={batch:null,status:{},timer:null,order:null,previewTimer:null,previewVersion:0,mutating:false};
 let lookupToastTimer;
-function lookupToast(show,title="조회 요청을 보냈어요",detail="잠시만 기다려 주세요. 진행 상황은 아래에 표시돼요.",pending=false){clearTimeout(lookupToastTimer);const toast=$("#lookup-toast");if(show){const host=$("#review-dialog").open?$("#review-dialog"):document.body;if(toast.parentElement!==host)host.append(toast);toast.querySelector("strong").textContent=title;toast.querySelector("p").textContent=detail;}toast.hidden=!show;toast.classList.toggle("is-processing",show&&pending);if(show&&!pending)lookupToastTimer=setTimeout(()=>{toast.hidden=true;},4200);}
+function lookupToast(show,title="조회 요청을 보냈어요",detail="잠시만 기다려 주세요. 진행 상황은 아래에 표시돼요.",pending=false){
+  clearTimeout(lookupToastTimer);
+  const toast=$("#lookup-toast"),image=toast.querySelector("img");
+  if(show){const host=$("#review-dialog").open?$("#review-dialog"):document.body;if(toast.parentElement!==host)host.append(toast);toast.querySelector("strong").textContent=title;toast.querySelector("p").textContent=detail;if(!image.hasAttribute("src"))image.src=image.dataset.src;}
+  else image.removeAttribute("src");
+  toast.hidden=!show;toast.classList.toggle("is-processing",show&&pending);
+  if(show&&!pending)lookupToastTimer=setTimeout(()=>lookupToast(false),4200);
+}
 function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
 function notice(text){for(const selector of ["#notice","#save-error"]){$(selector).hidden=!text;$(selector).textContent=text||"";}}
 function busy(button,value){if(value){button.dataset.idleLabel=button.textContent;button.textContent=button.id==="lookup-button"?"조회 요청 중…":"처리 중…";}else if(button.dataset.idleLabel){button.textContent=button.dataset.idleLabel;delete button.dataset.idleLabel;}button.disabled=value;button.setAttribute("aria-busy",String(value));}
@@ -22,10 +29,20 @@ function schedule(){clearTimeout(state.timer);if(state.batch&&["queued","fetchin
 async function loadBatch(id){try{state.batch=await api(`/api/batches/${id}/`);syncUrl();render();schedule();}catch(e){$("#lookup-help").textContent=e.message;}}
 function canEdit(){return ["review","saved"].includes(state.batch.state)&&!state.mutating;}
 function canCopy(){const b=state.batch,r=b.sheet_result||{};return !b.error&&["review","saved"].includes(b.state)&&r.verified&&(r.synced_revision===b.revision||(r.synced_revision===undefined&&b.state==="saved"));}
+function renderSheetReceipt(){
+  const b=state.batch,r=b.sheet_result||{},target=r.targets?.["청구 입력(내가 입력)"],count=Number(target?.count||0),receipt=$("#sheet-receipt"),link=$("#sheet-record-link");
+  receipt.hidden=link.hidden=!canCopy()||!count;
+  receipt.textContent="";
+  if(receipt.hidden)return;
+  const added=target.added_rows?.length||0,rows=target.rows||Array.from({length:count},(_,i)=>target.start+i);
+  const savedAt=new Date(r.synced_at||b.updated_at).toLocaleString("ko-KR");
+  receipt.textContent=`청구 입력 ${count}건 저장 · 신규 ${added}건 / 기존 ${count-added}건 갱신 · ${savedAt} 검산`;
+  link.href=`https://docs.google.com/spreadsheets/d/${r.spreadsheet_id}/edit#gid=${target.sheet_id}&range=A${Math.min(...rows)}:AD${Math.max(...rows)}`;
+}
 function canDecline(o){return o.calculation.ready&&o.review_issues.every(i=>["opp","cost"].includes(i.kind));}
 function render(){
   const b=state.batch;if(!b)return;const s=b.summary||{},loading=["queued","fetching"].includes(b.state),processing=["approved","saving"].includes(b.state);
-  $("#empty").hidden=true;$("#batch-content").hidden=false;$("#batch-bl").textContent=`BL ${b.bl}`;$("#state").textContent=b.state==="review"?(b.error?"연결 확인 필요":`추가 비용 ${s.pending||0}건 결정`):labels[b.state];$("#state").dataset.state=b.state;notice(b.error);
+  $("#empty").hidden=true;$("#batch-content").hidden=false;$("#batch-bl").textContent=`BL ${b.bl}`;$("#state").textContent=b.state==="review"?(b.error?"연결 확인 필요":`추가 비용 ${s.pending||0}건 결정`):b.state==="saved"?(!canCopy()?"시트 반영 확인 필요":!s.invoice_count?"청구 없음":labels.saved):labels[b.state];$("#state").dataset.state=b.state;notice(b.error);
   $("#source-time").textContent=b.collected_at?`중판 조회 ${new Date(b.collected_at).toLocaleString("ko-KR")}`:"";
   $("#progress-area").hidden=!(loading||processing);$("#progress").max=b.total||1;$("#progress").value=b.progress;
   $("#progress-label").textContent=loading?`중판 조회 ${b.progress} / ${b.total||"확인 중"}`:"확정된 청구를 시트에 저장·검산하고 있어요.";if(processing)$("#progress").removeAttribute("value");
@@ -37,10 +54,12 @@ function render(){
   if(loading)syncHelp="조회가 끝나면 확정된 청구부터 자동으로 시트에 저장합니다.";
   else if(processing)syncHelp="확정된 청구를 저장하고 금액을 확인합니다. 중판을 다시 조회하지 않습니다.";
   else if(b.error)syncHelp="결정한 내역은 보관되어 있습니다. 오류 내용을 확인한 뒤 다시 시도해 주세요.";
-  else if(s.pending)syncHelp=`확정된 ${s.invoice_count||0}건부터 자동 반영합니다. 추가 비용 ${s.pending}건은 결정 전까지 고객 청구에서 보류하며, 결정 저장 시 자동 갱신됩니다.`;
-  else if(b.state==="saved")syncHelp=s.invoice_count?"시트 저장·금액 검산을 완료했습니다. 비용을 수정하면 시트도 자동 갱신됩니다.":"청구할 금액이 없습니다. 기존 청구를 취소한 경우 해당 행도 0원으로 갱신했습니다.";
+  else if(b.state==="saved"&&!canCopy())syncHelp="저장 결과를 확인하지 못했습니다. ‘시트 다시 동기화’로 확인해 주세요.";
+  else if(s.pending)syncHelp=`${canCopy()?(s.invoice_count?`확정된 ${s.invoice_count}건은 시트 저장·검산을 완료했습니다.`:"현재 저장할 확정 청구가 없습니다."):"확정된 청구의 시트 반영이 필요합니다."} 추가 비용 ${s.pending}건은 결정 전까지 고객 청구에서 보류하며, 결정 저장 시 자동 갱신됩니다.`;
+  else if(b.state==="saved")syncHelp=s.invoice_count?"시트 저장·금액 검산을 완료했습니다. 비용을 수정하면 시트도 자동 갱신됩니다.":b.sheet_result?.no_changes?"현재 저장할 청구가 없습니다. 조회 원본은 DB에 보관했습니다.":"청구할 금액이 없습니다. 기존 청구를 취소한 경우 해당 행도 0원으로 갱신했습니다.";
   else syncHelp="확정된 청구는 자동 반영됩니다. 연결이 멈췄다면 아래 연결 관리에서 다시 동기화하세요.";
   $("#approval-help").textContent=syncHelp;
+  renderSheetReceipt();
   $("#rules-button").disabled=!canEdit();$("#refresh-button").disabled=state.mutating||!["review","saved","error"].includes(b.state);$("#sync-button").disabled=!canEdit();$("#retry-button").hidden=!b.error||loading||processing;$("#retry-button").disabled=state.mutating;
   $("#lookup-button").disabled=state.mutating||$("#lookup-button").getAttribute("aria-busy")==="true";$("#bl").readOnly=state.mutating;$("#review-save").disabled=!canEdit();$("#review-decline").disabled=!canEdit();$("#close-dialog").disabled=state.mutating;$("#review-dialog .dialog-body").inert=state.mutating;for(const button of document.querySelectorAll("#history-list button"))button.disabled=state.mutating;
   $("#rules-meta").textContent=b.rules?.version?`적용월 ${b.rules.month} / 무료 박스 ${b.rules.free_boxes}개`:"청구규칙을 불러오고 있습니다.";

@@ -11,7 +11,7 @@
     <dl class="summary"><div><dt>확정된 청구 주문</dt><dd id="sum-invoices">0건</dd></div><div><dt>확정 청구금액 합계</dt><dd id="sum-amount">계산 중</dd></div><div><dt>추가 비용 결정</dt><dd id="sum-pending">0건</dd></div></dl>
     <section id="decision-section" class="billing-section decision-section" aria-labelledby="decision-heading" hidden><div class="section-heading"><h2 id="decision-heading">추가 비용 결정</h2><span id="decision-count" class="count-label"></span></div><p id="decision-help" class="muted"></p><div id="decisions"></div><details id="completed-section" class="completed-section" hidden><summary id="completed-heading">결정 완료 내역</summary><div id="completed-decisions"></div></details></section>
     <section class="billing-section invoice-section" aria-labelledby="invoice-heading"><div class="section-heading"><h2 id="invoice-heading">고객에게 청구할 내역</h2><span class="section-note">청구할 금액이 있는 주문만 표시</span></div><p id="invoice-help" class="help" aria-live="polite"></p><div id="invoices"></div></section>
-    <section class="batch-actions" aria-labelledby="save-heading"><div class="save-copy"><h2 id="save-heading">공유시트 자동 반영</h2><p id="approval-help" class="help" aria-live="polite"></p><p id="save-error" class="save-error" role="alert" hidden></p></div><button id="retry-button" class="quiet" type="button" hidden>저장 다시 시도</button><a class="button quiet" href="https://docs.google.com/spreadsheets/d/1t_NcYwbYVcP2JGUJnE2tle8vVuZnyhKMFBPHl_0XwHg/edit#gid=1504460464" target="_blank" rel="noopener noreferrer">공유시트 열기 ↗</a></section>
+    <section class="batch-actions" aria-labelledby="save-heading"><div class="save-copy"><h2 id="save-heading">공유시트 자동 반영</h2><p id="approval-help" class="help" aria-live="polite"></p><p id="sheet-receipt" class="sheet-receipt" hidden></p><p class="help">전체 조회 원본은 DB에, 확정된 청구는 공유시트에 보관합니다. 직원은 이 화면에서 청구를 진행하면 됩니다.</p><p id="save-error" class="save-error" role="alert" hidden></p></div><div class="sheet-actions"><button id="retry-button" class="quiet" type="button" hidden>저장 다시 시도</button><a id="sheet-record-link" class="button quiet" href="https://docs.google.com/spreadsheets/d/1t_NcYwbYVcP2JGUJnE2tle8vVuZnyhKMFBPHl_0XwHg/edit#gid=1907300321" target="_blank" rel="noopener noreferrer" hidden>저장된 행 확인 ↗</a><a class="sheet-customer-link" href="https://docs.google.com/spreadsheets/d/1t_NcYwbYVcP2JGUJnE2tle8vVuZnyhKMFBPHl_0XwHg/edit#gid=1504460464" target="_blank" rel="noopener noreferrer">고객 청구 시트 열기 ↗</a></div></section>
     <details class="audit"><summary>최신 내역·연결 관리</summary><p class="muted">조회 시점의 중판 내역으로 계산합니다. 이후 중판에서 작업이 바뀌었다면 최신 내역을 다시 조회하세요.</p><div class="maintenance-actions"><button id="rules-button" class="quiet" type="button">청구규칙 다시 적용</button><button id="refresh-button" class="quiet" type="button">최신 중판 내역 다시 조회</button><button id="sync-button" class="quiet" type="button">시트 다시 동기화</button></div><p id="rules-meta" class="muted"></p><ul id="audit-list"></ul></details>
   </div></section>
 </main>
@@ -25,8 +25,8 @@
   <div class="dialog-footer"><button id="review-decline" class="quiet" type="button">추가 없이 확정</button><button id="review-save" class="primary" type="submit">추가 청구 반영</button></div>
 </form></dialog>
 <aside id="lookup-toast" class="lookup-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
-  <img src="{{ app_root }}{% static 'loading-bunny.png' %}" width="48" height="48" alt="" aria-hidden="true">
-  <div><strong>조회 요청을 보냈어요</strong><p>잠시만 기다려 주세요. 진행 상황은 아래에 표시돼요.</p></div>
+  <img data-src="{{ app_root }}{% static 'bunny-working.svg' %}" width="80" height="88" alt="" aria-hidden="true">
+  <div class="lookup-toast-copy"><strong>조회 요청을 보냈어요</strong><p>잠시만 기다려 주세요. 진행 상황은 아래에 표시돼요.</p></div>
 </aside>
 <noscript><p class="container notice">고객 청구 화면을 사용하려면 JavaScript를 켜 주세요.</p></noscript>{% endblock %}
 {% block scripts %}<script src="{{ app_root }}{% static 'app.js' %}" defer></script>{% endblock %}
