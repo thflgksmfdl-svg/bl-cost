@@ -150,18 +150,20 @@ dialog::backdrop { background:var(--color-backdrop); }
 .message-preview { margin-top:var(--space-sm); font-size:var(--text-sm); }
 .message-preview textarea { display:block; margin-top:var(--space-xs); min-height:200px; }
 .lookup-toast { position:fixed; inset-inline:0; bottom:var(--space-lg); z-index:var(--z-toast); display:flex; align-items:center; gap:var(--space-sm); width:min(420px,calc(100% - 32px)); margin-inline:auto; padding:var(--space-md); border:1px solid var(--color-rule); border-radius:var(--radius-card); background:var(--color-surface); box-shadow:var(--shadow-card); pointer-events:none; animation:lookup-arrive 180ms ease-out; }
-.lookup-toast svg { flex:0 0 48px; width:48px; height:48px; fill:none; stroke:var(--color-accent-deep); stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.lookup-toast img { flex:0 0 48px; width:48px; height:48px; object-fit:contain; }
 .lookup-toast strong { display:block; font-size:var(--text-md); }
 .lookup-toast p { margin-top:var(--space-2xs); font-size:var(--text-sm); color:var(--color-ink-2); }
-.lookup-toast.is-processing svg { animation:parcel-work 1s ease-in-out infinite; transform-origin:center; }
+.lookup-toast.is-processing img { animation:bunny-work 1s ease-in-out infinite; transform-origin:center; }
 .tracking-links>div { display:flex; flex-direction:column; gap:var(--space-xs); padding-top:var(--space-sm); }
 .source-tracking { font-size:var(--text-sm); overflow-wrap:anywhere; }
 .source-links { margin-bottom:var(--space-md); }
-@keyframes parcel-work { 0%,100% { transform:translateY(0) rotate(-3deg); } 50% { transform:translateY(-3px) rotate(3deg); } }
+@keyframes bunny-work { 0%,100% { transform:translateY(0) rotate(-3deg); } 50% { transform:translateY(-3px) rotate(3deg); } }
 @keyframes lookup-arrive { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-@media(prefers-reduced-motion:reduce) { .lookup-toast,.lookup-toast.is-processing svg { animation:none; } }
+@media(prefers-reduced-motion:reduce) { .lookup-toast,.lookup-toast.is-processing img { animation:none; } }
 .corrections:has(> :not([hidden])) { margin-bottom:var(--space-md); }
 @media(max-width:48rem) {
+  .batch-heading { flex-wrap:wrap; align-items:flex-start; }
+  .batch-heading>div { min-width:0; }
   .page-context { display:none; }
   .billing-section { margin-top:var(--space-xl); }
   .decision-section { margin-top:0; padding:var(--space-md); }

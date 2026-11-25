@@ -327,7 +327,7 @@ class WorkflowTests(TestCase):
             self.assertEqual(self.post("preview",order_id="17974",changes={"extra_amount":"0"}).status_code,200)
             r=self.post("edit",order_id="17974",changes={"extra_amount":"0","reviewed":True})
         self.assertEqual(r.status_code,200)
-        self.assertEqual(r.json()["state"],"review")
+        self.assertEqual(r.json()["state"],"approved")
         self.assertEqual(r.json()["invoices"],[])
         self.assertEqual(r.json()["completed_decisions"][0]["extra_amount"],"0")
         self.assertTrue(r.json()["sheet_result"]["verified"])
@@ -350,10 +350,10 @@ class WorkflowTests(TestCase):
         self.assertEqual(self.batch.source, source())
         self.assertEqual(self.batch.audit_set.count(), 1)
 
-    def test_pending_review_blocks_approval(self):
+    def test_pending_review_keeps_its_order_on_hold_without_blocking_sync(self):
         self.client.force_login(self.admin)
         with patch("ledger.views.Sheets") as sheets:
-            self.assertEqual(self.post("approve").status_code, 400)
+            self.assertEqual(self.post("sync").status_code, 200)
         sheets.assert_not_called()
 
     def test_csrf_is_required(self):
@@ -423,8 +423,11 @@ class SheetSyncTests(SimpleTestCase):
         with patch.object(self.client,"marker",return_value=None),patch.object(self.client,"prepare",return_value=plan),patch.object(self.client,"call") as call,patch.object(self.client,"verify",return_value={"verified":True}):
             self.assertTrue(self.client.save(self.batch)["verified"])
         updates=[r["updateCells"] for r in call.call_args.kwargs["json"]["requests"] if "updateCells" in r and r["updateCells"]["start"]["sheetId"]==1]
-        self.assertEqual([u["start"]["rowIndex"] for u in updates],[3,5])
+        self.assertEqual([u["start"]["rowIndex"] for u in updates if u["start"]["columnIndex"]==0],[3,5])
         self.assertTrue(all(len(u["rows"])==1 for u in updates))
+        for u in updates:
+            covered=range(u["start"]["columnIndex"],u["start"]["columnIndex"]+len(u["rows"][0]["values"]))
+            self.assertFalse({26,27}.intersection(covered))
 
     def test_legacy_single_tracking_matches_order_with_multiple_trackings(self):
         self.order["trackings"].append("another-tracking")
@@ -467,8 +470,114 @@ class SheetSyncTests(SimpleTestCase):
         plan=self.prepare();self.batch.sheet_plan=plan
         data=build_rows(self.batch,plan["order_ids"])
         actual=[[[v for v in row]] for rows in data.values() for row in rows]
+        actual[0][0][26:28]=["결제완료",46300]
         with patch.object(self.client,"marker",return_value={"metadataId":1}),patch.object(self.client,"values",return_value=actual):
             self.assertTrue(self.client.verify(self.batch)["verified"])
             actual[0][0][25]=999
             with self.assertRaisesMessage(DataError,"검산"):
                 self.client.verify(self.batch)
+
+    def test_pending_legacy_charge_is_held_at_zero_while_ready_orders_are_synced(self):
+        self.order["reviewed"]=False
+        ready={**self.order,"id":"ready","reviewed":True,"trackings":["READY-TRACK"],"extra_amount":"1000"}
+        self.batch.orders.append(ready)
+        plan=self.prepare();self.batch.sheet_plan=plan
+        self.assertEqual(plan["held"][0]["row"],4)
+        self.assertEqual(plan["targets"][BILL]["rows"],[5])
+        data=build_rows(self.batch,plan["order_ids"])
+        self.assertEqual(len(data[BILL]),1)
+        self.assertEqual(data[BILL][0][25],1000)
+        actual=[[[v for v in row]] for rows in data.values() for row in rows]
+        hold=plan["held"][0]
+        actual.extend([[hold["identity"]],[["직접입력",0,0]],[["",hold["note"]]]])
+        with patch.object(self.client,"marker",return_value={"metadataId":1}),patch.object(self.client,"values",return_value=actual):
+            self.assertTrue(self.client.verify(self.batch)["verified"])
+            actual[-2][0][2]=2000
+            with self.assertRaisesMessage(DataError,"검산"):
+                self.client.verify(self.batch)
+        with patch.object(self.client,"marker",return_value=None),patch.object(self.client,"prepare",return_value=plan),patch.object(self.client,"call") as call,patch.object(self.client,"verify",return_value={"verified":True}):
+            self.client.save(self.batch)
+        updates=[r["updateCells"] for r in call.call_args.kwargs["json"]["requests"] if "updateCells" in r and r["updateCells"]["start"]["sheetId"]==1]
+        hold_charge=next(u for u in updates if u["start"]["rowIndex"]==3 and u["start"]["columnIndex"]==23)
+        self.assertEqual([v["userEnteredValue"] for v in hold_charge["rows"][0]["values"]],[{"stringValue":"직접입력"},{"numberValue":0},{"numberValue":0}])
+        for u in updates:
+            covered=range(u["start"]["columnIndex"],u["start"]["columnIndex"]+len(u["rows"][0]["values"]))
+            self.assertFalse({26,27}.intersection(covered))
+
+    def test_unknown_pending_mode_can_hold_old_charge_without_inventing_source_data(self):
+        self.order.update(reviewed=False,mode="")
+        plan=self.prepare()
+        self.assertEqual(plan["targets"][BILL]["count"],0)
+        self.assertEqual(len(plan["held"]),1)
+        self.assertFalse(plan["empty"])
+        self.assertFalse(plan["create_approval"])
+
+    def test_no_charge_and_no_previous_row_finishes_without_writing_dummy_rows(self):
+        self.rows={};self.order["extra_amount"]="0"
+        plan=self.prepare();self.batch.sheet_plan=plan
+        self.assertTrue(plan["empty"])
+        with patch.object(self.client,"marker",return_value=None),patch.object(self.client,"prepare",return_value=plan),patch.object(self.client,"call") as call:
+            self.assertTrue(self.client.save(self.batch)["no_changes"])
+        call.assert_not_called()
+
+    def test_resolving_a_held_order_to_zero_clears_its_pending_label(self):
+        self.rows[4][23:26]=["직접입력",0,0]
+        self.rows[4][29]="시스템: 추가 비용 검토 대기 — 고객 청구 보류"
+        self.order["extra_amount"]="0"
+        plan=self.prepare()
+        self.assertEqual(plan["held"],[])
+        self.assertEqual(plan["targets"][BILL]["rows"],[4])
+        self.assertEqual(build_rows(self.batch,plan["order_ids"])[BILL][0][23],"직접입력")
+
+
+class AutoSyncWorkerTests(TestCase):
+    def setUp(self):
+        s=source()
+        self.batch=Batch.objects.create(bl=s["bl"],state="fetching",source=s,orders=[],rules={},summary={},created_by=None)
+
+    def test_initial_lookup_collects_once_then_queues_and_syncs_ready_rows_without_requery(self):
+        from ledger.management.commands.runworker import process
+        with patch("ledger.management.commands.runworker.Jungpan") as jp,patch("ledger.management.commands.runworker.Sheets") as sheets:
+            jp.return_value.__enter__.return_value.collect.return_value=source()
+            sheets.return_value.rules.return_value=RULES
+            sheets.return_value.marker.return_value=None
+            sheets.return_value.prepare.return_value={"held":[],"empty":True,"targets":{}}
+            sheets.return_value.save.return_value={"verified":True,"no_changes":True,"targets":{}}
+            process(self.batch)
+            self.batch.refresh_from_db()
+            self.assertEqual(self.batch.state,"approved")
+            self.assertIsNotNone(self.batch.collected_at)
+            self.batch.state="saving";self.batch.save()
+            process(self.batch)
+            self.assertEqual(jp.return_value.__enter__.return_value.collect.call_count,1)
+            sheets.return_value.save.assert_called_once()
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.state,"review")
+        self.assertEqual(self.batch.sheet_result["pending"],1)
+        self.assertEqual(self.batch.sheet_result["synced_revision"],self.batch.revision)
+
+    def test_decision_sync_uses_stored_source_and_finishes_without_any_jungpan_request(self):
+        from ledger.management.commands.runworker import process
+        self.batch.orders=assemble(source());self.batch.orders[0].update(reviewed=True,extra_amount="1000",reason="OPP")
+        self.batch.rules=RULES;self.batch.summary=summarize(self.batch.orders,RULES);self.batch.queue_sync();self.batch.state="saving";self.batch.save()
+        with patch("ledger.management.commands.runworker.Jungpan") as jp,patch("ledger.management.commands.runworker.Sheets") as sheets:
+            sheets.return_value.marker.return_value=None
+            sheets.return_value.rules.return_value=RULES
+            sheets.return_value.prepare.return_value={"held":[],"targets":{}}
+            sheets.return_value.save.return_value={"verified":True,"targets":{}}
+            process(self.batch)
+            jp.assert_not_called()
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.state,"saved")
+        self.assertEqual(self.batch.source,source())
+        self.assertTrue(self.batch.sheet_result["verified"])
+
+    def test_uncertain_write_retries_verify_its_marker_without_querying_source_or_rules(self):
+        from ledger.management.commands.runworker import process
+        self.batch.orders=assemble(source());self.batch.orders[0].update(reviewed=True,extra_amount="1000",reason="OPP")
+        self.batch.rules=RULES;self.batch.summary=summarize(self.batch.orders,RULES);self.batch.queue_sync();self.batch.sheet_plan={"write_key":"previous-attempt","held":[]};self.batch.state="saving";self.batch.save()
+        with patch("ledger.management.commands.runworker.Jungpan") as jp,patch("ledger.management.commands.runworker.Sheets") as sheets:
+            sheets.return_value.marker.return_value={"metadataId":1}
+            sheets.return_value.save.return_value={"verified":True,"targets":{}}
+            process(self.batch)
+            jp.assert_not_called();sheets.return_value.rules.assert_not_called();sheets.return_value.prepare.assert_not_called()

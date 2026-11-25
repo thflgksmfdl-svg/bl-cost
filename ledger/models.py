@@ -1,6 +1,7 @@
 import uuid
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class Batch(models.Model):
@@ -23,6 +24,11 @@ class Batch(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     approved_at = models.DateTimeField(null=True)
+    collected_at = models.DateTimeField(null=True)
+
+    def queue_sync(self, actor=None):
+        self.state, self.error, self.sheet_plan = "approved", "", {}
+        self.approved_by, self.approved_at = actor, timezone.now()
 
     class Meta:
         db_table = "blcost_batch"

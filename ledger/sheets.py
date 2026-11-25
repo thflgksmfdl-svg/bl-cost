@@ -44,7 +44,7 @@ def build_rows(batch, include_zero=()):
     rules = batch.rules
     for o in batch.orders:
         if review_issues(o, rules) and not o["reviewed"]:
-            raise DataError("추가 비용 결정을 먼저 완료해 주세요.")
+            continue
         c = calculate(o, rules)
         if not c["ready"]:
             raise DataError("확정할 수 없는 계산이 남아 있습니다.")
@@ -162,7 +162,7 @@ class Sheets:
             raise DataError("청구 입력의 열 구조가 변경되었습니다. 저장을 중단했습니다.")
         existing = [i+4 for i,r in enumerate(columns) if r and str(r[0]) == batch.bl]
         snapshots = self.values([f"'{BILL}'!A{r}:AD{r}" for r in existing]) if existing else []
-        matches, clear_ids = {}, []
+        matches, clear_ids, held = {}, [], []
         for rownum, values in zip(existing, snapshots):
             row = values[0] if values else []
             tracks = set(re.split(r"[,\s/]+", str(row[4]).strip())) if len(row)>4 and row[4] else set()
@@ -176,7 +176,12 @@ class Sheets:
             if oid in matches:
                 raise DataError(f"청구 입력에 같은 주문이 여러 행에 있습니다({matches[oid]}, {rownum}행). 중복 행을 확인해 주세요.")
             matches[oid] = rownum
-            if previous:
+            if review_issues(candidates[0],batch.rules) and not candidates[0]["reviewed"]:
+                note=row[29] if len(row)>29 else ""
+                if not str(note).startswith("시스템: 추가 비용 검토 대기"):
+                    note="시스템: 추가 비용 검토 대기 — 고객 청구 보류\n"+str(note)
+                held.append({"row":rownum,"identity":row[1:5],"note":note})
+            if previous or (len(row)>29 and str(row[29]).startswith("시스템: 추가 비용 검토 대기")):
                 clear_ids.append(oid)
         starts = {BILL: max((i+5 for i,r in enumerate(columns) if any(v not in (None, "") for v in r)),default=4)}
         create_approval = APPROVAL not in props
@@ -191,8 +196,6 @@ class Sheets:
                 raise DataError("시스템 승인기준 탭의 열 구조를 확인해 주세요.")
             starts[APPROVAL] = max(2,len(keys)+1)
         data = build_rows(batch, clear_ids)
-        if not data[BILL]:
-            raise DataError("청구할 금액이 없어 시트에 추가할 행이 없습니다.")
         order_ids = [r[0].split(":")[-1] for r in data[APPROVAL]]
         bill_rows, next_row, added = [], starts[BILL], []
         for oid in order_ids:
@@ -206,9 +209,10 @@ class Sheets:
                          "grid_rows": props[name]["gridProperties"]["rowCount"]} for name,rows in data.items()}
         targets[BILL]["rows"], targets[BILL]["added_rows"] = bill_rows, added
         before = self.values([f"'{BILL}'!A{r}:AD{r}" for r in existing], formulas=True) if existing else []
-        return {"targets": targets, "order_ids": order_ids, "before": before, "existing_rows": existing,
+        return {"targets": targets, "order_ids": order_ids, "before": before, "existing_rows": existing,"held":held,
+                "empty":not data[BILL] and not held,
                 "write_key": f"{batch.id}:{getattr(batch,'approved_at',None) or getattr(batch,'revision',0)}",
-                "data_hash": fingerprint(data), "sheet_id": settings.SHEET_ID, "create_approval": create_approval}
+                "data_hash": fingerprint({"rows":data,"held":held}), "sheet_id": settings.SHEET_ID, "create_approval": create_approval and bool(data[APPROVAL])}
 
     def save(self, batch):
         if self.marker(batch):
@@ -216,6 +220,8 @@ class Sheets:
         plan = self.prepare(batch)
         if plan != batch.sheet_plan:
             raise ReviewRequired("반영 요청 이후 시트 내용이나 행 위치가 바뀌었습니다. 최신 금액을 확인하고 다시 반영해 주세요.")
+        if plan["empty"]:
+            return self.verify(batch)
         data = formula_rows(batch, plan)
         requests = []
         if plan["create_approval"]:
@@ -239,8 +245,14 @@ class Sheets:
                         "endRowIndex": rownum-1, "startColumnIndex": 0, "endColumnIndex": len(row)},
                         "destination": {"sheetId": target["sheet_id"], "startRowIndex": rownum-1,
                         "endRowIndex": rownum, "startColumnIndex": 0, "endColumnIndex": len(row)}, "pasteType": "PASTE_FORMAT"}})
-                requests.append({"updateCells": {"start": {"sheetId": target["sheet_id"], "rowIndex": rownum - 1, "columnIndex": 0},
-                                 "rows": [{"values": [cell(v) for v in row]}], "fields": "userEnteredValue"}})
+                segments=[(0,row[:26]),(28,row[28:])] if name==BILL else [(0,row)]
+                for col, values in segments:
+                    requests.append({"updateCells": {"start": {"sheetId": target["sheet_id"], "rowIndex": rownum - 1, "columnIndex": col},
+                                     "rows": [{"values": [cell(v) for v in values]}], "fields": "userEnteredValue"}})
+        for hold in plan["held"]:
+            for col,values in [(23,["직접입력",0,0]),(28,["",hold["note"]])]:
+                requests.append({"updateCells":{"start":{"sheetId":plan["targets"][BILL]["sheet_id"],"rowIndex":hold["row"]-1,"columnIndex":col},
+                    "rows":[{"values":[cell(v) for v in values]}],"fields":"userEnteredValue"}})
         requests += [
             {"createDeveloperMetadata": {"developerMetadata": {"metadataKey": "blcost_batch", "metadataValue": plan["write_key"],
                 "location": {"spreadsheet": True}, "visibility": "DOCUMENT"}}},
@@ -250,6 +262,8 @@ class Sheets:
         return self.verify(batch)
 
     def verify(self, batch):
+        if batch.sheet_plan.get("empty"):
+            return {"verified":True,"targets":batch.sheet_plan["targets"],"no_changes":True,"spreadsheet_id":settings.SHEET_ID}
         if not self.marker(batch):
             raise DataError("저장 완료 표식이 없습니다. 중복 입력하지 않고 확인을 중단했습니다.")
         data = build_rows(batch, batch.sheet_plan.get("order_ids", ()))
@@ -259,19 +273,25 @@ class Sheets:
                 last = "AD" if name == BILL else "AC"
                 for rownum, row in zip(positions(batch.sheet_plan["targets"][name]), rows):
                     ranges.append(f"'{name}'!A{rownum}:{last}{rownum}")
-                    expected.append(row)
+                    expected.append((row,name==BILL))
+        for hold in batch.sheet_plan.get("held",[]):
+            for first,last,row in [("B","E",hold["identity"]),("X","Z",["직접입력",0,0]),("AC","AD",["",hold["note"]])]:
+                ranges.append(f"'{BILL}'!{first}{hold['row']}:{last}{hold['row']}")
+                expected.append((row,False))
         actual = self.values(ranges)
         if len(actual) != len(expected):
             raise DataError("저장된 행 수가 다릅니다. 완료로 처리하지 않았습니다.")
-        for read_rows, row in zip(actual, expected):
+        for read_rows, (row,preserve_payment) in zip(actual, expected):
             if len(read_rows) != 1:
                 raise DataError("저장된 행 수가 다릅니다. 완료로 처리하지 않았습니다.")
             for i, value in enumerate(row):
+                if preserve_payment and i in (26,27):
+                    continue
                 got = read_rows[0][i] if len(read_rows[0]) > i else None
                 if value in (None, "") and got in (None, ""):
                     continue
                 if isinstance(value, (Decimal, int, float)):
-                    if abs(decimal(got, minimum=Decimal("-1000000000000")) - Decimal(str(value))) > Decimal("0.01"):
+                    if abs(decimal(got, minimum=Decimal("-1000000000000"),maximum=Decimal("1e24")) - Decimal(str(value))) > Decimal("0.01"):
                         raise DataError("시트 저장 금액·수량 검산이 일치하지 않습니다.")
                 elif got != str(value):
                     raise DataError("시트 저장 문자·식별번호 검산이 일치하지 않습니다.")

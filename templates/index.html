@@ -1,18 +1,18 @@
 {% extends 'base.html' %}{% load static %}{% block content %}
 <main id="main" class="container app">
-  <div class="page-heading"><div><h1>고객 청구 정산</h1><p class="muted">BL 조회부터 추가 비용 결정, 청구 문구와 시트 반영까지.</p></div><span class="page-context">중판 작업비</span></div>
+  <div class="page-heading"><div><h1>고객 청구 정산</h1><p class="muted">BL을 한 번 조회하면 확정된 청구부터 공유시트에 자동 반영됩니다.</p></div><span class="page-context">중판 작업비</span></div>
   <section class="lookup" aria-label="BL 조회"><form id="lookup-form">{% csrf_token %}<label for="bl">조회할 BL 번호</label><div class="lookup-control"><input id="bl" name="bl" inputmode="numeric" pattern="20[0-9]{10}" maxlength="12" placeholder="예: 202611240025" required aria-describedby="lookup-help"><button class="primary" id="lookup-button" type="submit">청구 내역 가져오기</button></div><p id="lookup-help" class="help" aria-live="polite">중판에서 조회하고 청구규칙에 따라 계산합니다.</p></form></section>
   <details class="lookup-history"><summary>이전에 조회한 BL</summary><div id="history-list" class="history-list"></div></details>
   <section id="workspace" class="workspace" aria-label="고객 청구 결과"><div id="empty" class="empty"><h2>BL을 입력하면 청구할 내역이 표시됩니다.</h2><p>무료 주문은 제외하고, 금액 결정이 필요한 항목만 따로 보여드립니다.</p></div>
   <div id="batch-content" hidden>
-    <div class="batch-heading"><div><p class="muted">조회한 묶음주문</p><h2 id="batch-bl"></h2></div><span id="state" class="badge" role="status"></span></div>
+    <div class="batch-heading"><div><p class="muted">조회한 묶음주문</p><h2 id="batch-bl"></h2><p id="source-time" class="help"></p></div><span id="state" class="badge" role="status"></span></div>
     <div id="notice" class="notice" role="status" hidden></div>
     <div id="progress-area" class="progress-area" hidden><label for="progress" id="progress-label">중판 조회 중</label><progress id="progress" max="1" value="0"></progress></div>
-    <dl class="summary"><div><dt>청구할 주문</dt><dd id="sum-invoices">0건</dd></div><div><dt>청구금액 합계</dt><dd id="sum-amount">계산 중</dd></div><div><dt>추가 비용 결정</dt><dd id="sum-pending">0건</dd></div></dl>
+    <dl class="summary"><div><dt>확정된 청구 주문</dt><dd id="sum-invoices">0건</dd></div><div><dt>확정 청구금액 합계</dt><dd id="sum-amount">계산 중</dd></div><div><dt>추가 비용 결정</dt><dd id="sum-pending">0건</dd></div></dl>
     <section id="decision-section" class="billing-section decision-section" aria-labelledby="decision-heading" hidden><div class="section-heading"><h2 id="decision-heading">추가 비용 결정</h2><span id="decision-count" class="count-label"></span></div><p id="decision-help" class="muted"></p><div id="decisions"></div><details id="completed-section" class="completed-section" hidden><summary id="completed-heading">결정 완료 내역</summary><div id="completed-decisions"></div></details></section>
     <section class="billing-section invoice-section" aria-labelledby="invoice-heading"><div class="section-heading"><h2 id="invoice-heading">고객에게 청구할 내역</h2><span class="section-note">청구할 금액이 있는 주문만 표시</span></div><p id="invoice-help" class="help" aria-live="polite"></p><div id="invoices"></div></section>
-    <section class="batch-actions" aria-labelledby="save-heading"><div class="save-copy"><h2 id="save-heading">공유시트 반영</h2><p id="approval-help" class="help" aria-live="polite"></p><p id="save-error" class="save-error" role="alert" hidden></p></div><button id="approve-button" class="primary" type="button">청구 내역을 시트에 반영</button></section>
-    <details class="audit"><summary>다시 조회·시트 연결</summary><div class="maintenance-actions"><button id="rules-button" class="quiet" type="button">청구규칙 갱신</button><button id="refresh-button" class="quiet" type="button">중판 다시 조회</button><button id="retry-button" class="quiet" type="button" hidden>실패한 처리 재시도</button></div><p id="rules-meta" class="muted"></p><ul id="audit-list"></ul></details>
+    <section class="batch-actions" aria-labelledby="save-heading"><div class="save-copy"><h2 id="save-heading">공유시트 자동 반영</h2><p id="approval-help" class="help" aria-live="polite"></p><p id="save-error" class="save-error" role="alert" hidden></p></div><button id="retry-button" class="quiet" type="button" hidden>저장 다시 시도</button><a class="button quiet" href="https://docs.google.com/spreadsheets/d/1t_NcYwbYVcP2JGUJnE2tle8vVuZnyhKMFBPHl_0XwHg/edit#gid=1504460464" target="_blank" rel="noopener noreferrer">공유시트 열기 ↗</a></section>
+    <details class="audit"><summary>최신 내역·연결 관리</summary><p class="muted">조회 시점의 중판 내역으로 계산합니다. 이후 중판에서 작업이 바뀌었다면 최신 내역을 다시 조회하세요.</p><div class="maintenance-actions"><button id="rules-button" class="quiet" type="button">청구규칙 다시 적용</button><button id="refresh-button" class="quiet" type="button">최신 중판 내역 다시 조회</button><button id="sync-button" class="quiet" type="button">시트 다시 동기화</button></div><p id="rules-meta" class="muted"></p><ul id="audit-list"></ul></details>
   </div></section>
 </main>
 <dialog id="review-dialog" aria-labelledby="review-title"><form id="review-form">
@@ -25,7 +25,7 @@
   <div class="dialog-footer"><button id="review-decline" class="quiet" type="button">추가 없이 확정</button><button id="review-save" class="primary" type="submit">추가 청구 반영</button></div>
 </form></dialog>
 <aside id="lookup-toast" class="lookup-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
-  <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false"><path d="m8 14 14-7 14 7v21a4 4 0 0 1-4 4H12a4 4 0 0 1-4-4Z"/><path d="m8 14 14 7 14-7M22 7v14"/><circle cx="16" cy="28" r="1"/><circle cx="28" cy="28" r="1"/><path d="M18 32q4 4 8 0"/></svg>
+  <img src="{{ app_root }}{% static 'loading-bunny.png' %}" width="48" height="48" alt="" aria-hidden="true">
   <div><strong>조회 요청을 보냈어요</strong><p>잠시만 기다려 주세요. 진행 상황은 아래에 표시돼요.</p></div>
 </aside>
 <noscript><p class="container notice">고객 청구 화면을 사용하려면 JavaScript를 켜 주세요.</p></noscript>{% endblock %}

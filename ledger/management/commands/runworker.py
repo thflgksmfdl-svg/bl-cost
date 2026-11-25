@@ -30,30 +30,37 @@ def process(batch):
             batch.source, batch.orders, batch.rules = source, orders, rules
             batch.source_hash, batch.summary = source_fingerprint(source), summarize(orders, rules)
             batch.state, batch.error = "review", error
+            batch.collected_at = timezone.now()
+            if rules:
+                batch.queue_sync()
             batch.revision += 1
             batch.save()
             Audit.objects.create(batch=batch, action="수집 완료", detail={"summary": batch.summary, "source_hash": batch.source_hash})
     else:
         client = Sheets()
         if not client.marker(batch):
-            with Jungpan() as jp:
-                source = jp.collect(batch.bl, lambda data, done, total: Batch.objects.filter(pk=batch.pk).update(
-                    progress=done, total=total, updated_at=timezone.now()))
-            if source_fingerprint(source) != source_fingerprint(batch.source):
-                raise DataError("승인 후 중판 원본이 변경되었습니다. 원본을 다시 조회하고 검토해 주세요.")
             if client.rules(batch.rules["month"])["version"] != batch.rules["version"]:
-                raise ReviewRequired("승인 후 청구규칙이 변경되었습니다. 규칙을 다시 불러와 검토해 주세요.")
+                raise ReviewRequired("시트의 청구규칙이 바뀌었습니다. ‘청구규칙 다시 적용’을 눌러 주세요. 중판을 다시 조회할 필요는 없습니다.")
+            if not batch.sheet_plan or "held" not in batch.sheet_plan:
+                batch.sheet_plan = client.prepare(batch)
+                with transaction.atomic():
+                    if Batch.objects.filter(pk=batch.pk,revision=batch.revision,state="saving").update(sheet_plan=batch.sheet_plan)!=1:
+                        raise ReviewRequired("다른 작업에서 내역이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 동기화해 주세요.")
+                    Audit.objects.create(batch=batch,action="자동 반영 준비",detail={"revision":batch.revision,"plan":batch.sheet_plan})
         result = client.save(batch)
         with transaction.atomic():
             batch = Batch.objects.select_for_update().get(pk=batch.pk)
-            batch.state, batch.sheet_result, batch.error = "saved", result, ""
+            batch.state = "review" if batch.summary.get("pending") else "saved"
+            batch.sheet_result = {**result,"synced_revision":batch.revision+1,"synced_at":timezone.now().isoformat(),
+                                  "invoice_count":batch.summary["invoice_count"],"pending":batch.summary["pending"]}
+            batch.error = ""
             batch.revision += 1
             batch.save()
-            Audit.objects.create(batch=batch, action="시트 반영 및 검산 완료", detail=result)
+            Audit.objects.create(batch=batch, action="시트 자동 반영 및 검산 완료", detail=batch.sheet_result)
 
 
 class Command(BaseCommand):
-    help = "중판 조회·승인된 시트 저장을 DB 대기열에서 처리합니다."
+    help = "중판 조회·확정 청구의 자동 시트 저장을 DB 대기열에서 처리합니다."
 
     def handle(self, *args, **options):
         if connection.vendor == "postgresql":

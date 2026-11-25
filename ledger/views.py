@@ -7,7 +7,6 @@ from decimal import Decimal
 from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import redirect, render
-from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
@@ -31,6 +30,7 @@ def serialized(batch, detail=False):
     data = {"id": str(batch.id), "bl": batch.bl, "state": batch.state, "progress": batch.progress,
             "total": batch.total, "summary": batch.summary, "revision": batch.revision, "error": batch.error,
             "created_at": batch.created_at.isoformat(), "updated_at": batch.updated_at.isoformat()}
+    data["collected_at"] = batch.collected_at.isoformat() if batch.collected_at else None
     if batch.orders:
         data["summary"] = summarize(batch.orders, batch.rules)
     if detail:
@@ -101,8 +101,14 @@ def batches(request):
         with transaction.atomic():
             actor = request.user if request.user.is_authenticated else None
             batch, created = Batch.objects.get_or_create(bl=bl, defaults={"created_by": actor})
+            batch = Batch.objects.select_for_update().get(pk=batch.pk)
             if created:
                 Audit.objects.create(batch=batch, actor=actor, action="조회 요청")
+            elif batch.state == "review" and batch.orders and batch.rules and not batch.error and batch.sheet_result.get("synced_revision") != batch.revision:
+                batch.queue_sync(actor)
+                batch.revision += 1
+                batch.save()
+                Audit.objects.create(batch=batch, actor=actor, action="기존 조회 내역 자동 반영 요청")
         return JsonResponse(serialized(batch, True), status=201 if created else 200)
     except DataError as e:
         return JsonResponse({"error": str(e)}, status=400)
@@ -189,44 +195,40 @@ def batch_action(request, pk, action):
                     raise DataError("주문을 찾지 못했습니다.")
                 batch.orders = new
                 batch.summary = summarize(new, batch.rules)
-                batch.state, batch.error, batch.sheet_plan = "review", "", {}
-                batch.approved_by, batch.approved_at = None, None
-                Audit.objects.create(batch=batch, actor=actor, action="검토 수정", detail={"order_id": order_id, "changes": data["changes"]})
+                batch.queue_sync(actor)
+                Audit.objects.create(batch=batch, actor=actor, action="추가 비용 결정·자동 반영 요청", detail={"order_id": order_id, "changes": data["changes"]})
             elif action == "rules":
-                if batch.state != "review":
+                if batch.state not in ("review", "saved"):
                     raise DataError("검토 중인 초안에서만 규칙을 불러올 수 있습니다.")
                 batch.rules = Sheets().rules(f"{batch.bl[:4]}-{batch.bl[4:6]}")
                 batch.summary = summarize(batch.orders, batch.rules)
+                batch.queue_sync(actor)
                 Audit.objects.create(batch=batch, actor=actor, action="청구규칙 갱신", detail={"version": batch.rules["version"]})
-            elif action == "approve":
-                if batch.state != "review":
-                    raise DataError("검토 중인 초안만 승인할 수 있습니다.")
+            elif action in ("sync", "approve"):
+                if batch.state not in ("review", "saved") or not batch.orders or not batch.rules:
+                    raise DataError("중판 조회와 청구규칙 연결이 완료된 내역만 동기화할 수 있습니다.")
                 batch.summary = summarize(batch.orders, batch.rules)
-                if not batch.summary["calculation_ready"] or batch.summary["pending"]:
-                    raise DataError("금액을 계산할 수 없는 주문이나 미검토 항목이 남아 있습니다.")
-                if any(not o["customer"] for o in batch.orders):
-                    raise DataError("고객명이 비어 있는 주문을 확인해 주세요.")
-                client = Sheets()
-                if client.rules(batch.rules["month"])["version"] != batch.rules["version"]:
-                    raise DataError("시트의 단가·환율·청구규칙이 바뀌었습니다. 규칙을 다시 불러와 검토해 주세요.")
-                batch.approved_by, batch.approved_at = actor, timezone.now()
-                batch.sheet_plan = client.prepare(batch)
-                batch.state, batch.error = "approved", ""
-                batch.progress = 0
-                Audit.objects.create(batch=batch, actor=actor, action="시트 반영 요청", detail={"summary": batch.summary, "plan": batch.sheet_plan})
+                batch.queue_sync(actor)
+                Audit.objects.create(batch=batch, actor=actor, action="시트 동기화 요청", detail={"summary": batch.summary})
             elif action == "retry":
                 if batch.state != "error":
                     raise DataError("오류가 발생한 작업만 재시도할 수 있습니다.")
-                batch.state = "approved" if batch.approved_at and batch.sheet_plan else "queued"
+                if batch.approved_at and batch.sheet_plan:
+                    batch.state = "approved"
+                elif batch.orders and batch.rules:
+                    batch.queue_sync(actor)
+                else:
+                    batch.state = "queued"
                 batch.error = ""
                 Audit.objects.create(batch=batch, actor=actor, action="재시도")
             elif action == "refresh":
-                if batch.state not in ("review", "error") or not data.get("confirm_discard"):
+                if batch.state not in ("review", "saved", "error") or not data.get("confirm_discard"):
                     raise DataError("기존 검토 내용을 초기화할지 확인해 주세요.")
                 Audit.objects.create(batch=batch, actor=actor, action="원본 다시 조회", detail={"previous_orders": batch.orders})
                 batch.state, batch.source, batch.orders, batch.rules = "queued", {}, [], {}
                 batch.progress, batch.total, batch.approved_by, batch.approved_at = 0, 0, None, None
                 batch.sheet_plan, batch.error = {}, ""
+                batch.collected_at = None
             else:
                 raise DataError("지원하지 않는 작업입니다.")
             batch.revision += 1
