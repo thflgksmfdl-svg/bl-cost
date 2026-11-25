@@ -67,3 +67,9 @@ test('rabbit motion exists only while its notification is visible',()=>{
   assert.equal(r.element('#lookup-toast').hidden,false);assert.equal(r.timers.length,1);
   r.run('lookupToast(false)');assert.equal(img.src,undefined);
 });
+
+test('security failures show the server recovery message instead of a response parsing error',async()=>{
+  const r=setup(saved());
+  r.run(`fetch=async()=>({ok:false,status:403,redirected:false,json:async()=>({error:"보안 확인에 실패해 요청을 처리하지 못했습니다. 입력한 내용을 보관한 뒤 화면을 새로고침하고 다시 시도해 주세요."})})`);
+  await assert.rejects(r.run('api("/api/batches/example/preview/",{})'),/보안 확인.*새로고침/);
+});

@@ -259,10 +259,50 @@ class WorkflowTests(TestCase):
         token=client.cookies["csrftoken"].value
         data=json.dumps({"revision":0,"order_id":"17974","changes":{"extra_hours":"0.5","reason":"OPP"}})
         url=f"/bl-cost/api/batches/{self.batch.id}/preview/"
-        r=client.post(url,data,content_type="application/json",HTTP_X_CSRFTOKEN=token,HTTP_ORIGIN="https://jp-pack.netlify.app")
+        self.batch.state="saved";self.batch.save()
+        for origin in ("https://jppack.netlify.app", "https://jp-pack.netlify.app"):
+            with self.subTest(origin=origin):
+                r=client.post(url,data,content_type="application/json",HTTP_X_CSRFTOKEN=token,HTTP_ORIGIN=origin)
+                self.assertEqual(r.status_code,200)
+                self.assertEqual(r.json()["calculation"]["total"],"8250")
+        for origin in ("https://unknown.netlify.app", "https://jppack.netlify.app.evil.example", "https://other-jppack.netlify.app"):
+            with self.subTest(origin=origin):
+                r=client.post(url,data,content_type="application/json",HTTP_X_CSRFTOKEN=token,HTTP_ORIGIN=origin)
+                self.assertEqual(r.status_code,403)
+                self.assertIn("보안 확인",r.json()["error"])
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.revision,0)
+        self.assertEqual(self.batch.orders[0]["extra_hours"],"0")
+
+    def test_current_portal_can_correct_saved_charge_with_csrf(self):
+        client=Client(enforce_csrf_checks=True,HTTP_X_FORWARDED_PROTO="https")
+        client.get("/bl-cost/")
+        token=client.cookies["csrftoken"].value
+        self.batch.state="saved"
+        self.batch.orders[0].update(reviewed=True,extra_amount="1000",reason="OPP 비용")
+        self.batch.save()
+        data=json.dumps({"revision":0,"order_id":"17974","changes":{"extra_amount":"2000","reviewed":True}})
+        with patch("ledger.views.Sheets") as sheets:
+            r=client.post(f"/bl-cost/api/batches/{self.batch.id}/edit/",data,content_type="application/json",
+                HTTP_X_CSRFTOKEN=token,HTTP_ORIGIN="https://jppack.netlify.app")
         self.assertEqual(r.status_code,200)
-        self.assertEqual(r.json()["calculation"]["total"],"8250")
-        self.assertEqual(client.post(url,data,content_type="application/json",HTTP_X_CSRFTOKEN=token,HTTP_ORIGIN="https://unknown.netlify.app").status_code,403)
+        self.assertEqual(r.json()["state"],"approved")
+        self.assertEqual(r.json()["summary"]["invoice_total"],"2000")
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.orders[0]["extra_amount"],"2000")
+        self.assertEqual(self.batch.source,source())
+        sheets.assert_not_called()
+
+    def test_csrf_failure_returns_actionable_json_without_saving(self):
+        client=Client(enforce_csrf_checks=True,HTTP_X_FORWARDED_PROTO="https")
+        for prefix in ("", "/bl-cost"):
+            r=client.post(f"{prefix}/api/batches/{self.batch.id}/edit/",json.dumps({"revision":0}),content_type="application/json",HTTP_ORIGIN="https://jppack.netlify.app")
+            self.assertEqual(r.status_code,403)
+            self.assertIn("새로고침",r.json()["error"])
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.revision,0)
+        self.assertEqual(self.batch.audit_set.count(),0)
+        self.assertIn("text/html",client.post("/admin/login/",{}).headers["Content-Type"])
 
     def test_existing_draft_reclassifies_without_overwriting_source_or_decisions(self):
         o=self.batch.orders[0]

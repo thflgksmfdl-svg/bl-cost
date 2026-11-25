@@ -9,12 +9,20 @@ from django.http import JsonResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
+from django.views.csrf import csrf_failure as csrf_failure_page
 
 from .domain import DataError, calculate, decimal, summarize, review_issues, invoice_message
 from .models import Audit, Batch, ReportSnapshot
 from .reports import queue_reports
 from .sheets import Sheets
 from .jungpan import tracking_url
+
+
+@never_cache
+def csrf_failure(request, reason=""):
+    if request.path_info.startswith(("/api/", "/bl-cost/api/")):
+        return JsonResponse({"error": "보안 확인에 실패해 요청을 처리하지 못했습니다. 입력한 내용을 보관한 뒤 화면을 새로고침하고 다시 시도해 주세요."}, status=403)
+    return csrf_failure_page(request, reason=reason)
 
 
 def payload(request):
