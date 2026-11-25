@@ -213,7 +213,7 @@ class Sheets:
         write(check_id, 6, 0, [["BL 번호", "상품 행", "실제 작업시간(h)", "인쇄스티커", "스티커", "바코드", "벌크작업", "4종 합계", "재봉", "도장", "재봉·도장 합계", "검산 상태", "차이 항목 / 확인사항"]]+check, check_end)
         write(check_id, 1, 0, [["전체 작업 포함 · 중판 조회값 우선 · 기존 자료와의 차이는 확인사항에 표시 · 원본 집계 P:AF 보존"]])
         ref = lambda c: f"'{SUMMARY_SHEET}'!{c}2:{c}"
-        for col, value in [(0, Formula(f"=COUNTA({ref('A')})")), (2, Formula(f'=TEXT(SUM({ref("F")}),"#,##0.##")&"시간"')),
+        for col, value in [(0, Formula(f"=COUNTA({ref('A')})")), (2, Formula(f'=IF(MOD(SUM({ref("F")}),1)=0,TEXT(SUM({ref("F")}),"#,##0"),TEXT(SUM({ref("F")}),"#,##0.0"))&"시간"')),
             (4, Formula(f'=TEXT(SUM({ref("K")}),"#,##0")&"개"')), (8, Formula(f'=TEXT(SUM({ref("N")}),"#,##0")&"개"')),
             (11, Formula(f'=COUNTIF({ref("P")},"?*")&" BL"'))]:
             write(check_id, 3, col, [[value]])
@@ -240,14 +240,18 @@ class Sheets:
                 "backgroundColor": {"red": .85, "green": .94, "blue": .89}, "textFormat": {"bold": True}, "wrapStrategy": "WRAP"}},
                 "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.wrapStrategy"}})
         requests.append({"updateSheetProperties": {"properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}})
-        for first, last, pattern in [(4, 7, "#,##0.##"), (7, 10, '#,##0"원"'), (10, 11, "#,##0"), (11, 12, '#,##0"원"')]:
+        requests.append({"repeatCell": {"range": {"sheetId": dashboard_id, "startRowIndex": 3, "endRowIndex": 9, "startColumnIndex": 1, "endColumnIndex": 2},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": '#,##0"원"'}, "wrapStrategy": "WRAP"}},
+            "fields": "userEnteredFormat.numberFormat,userEnteredFormat.wrapStrategy"}})
+        for first, last, pattern in [(4, 5, "#,##0"), (5, 6, "#,##0.0"), (6, 7, "#,##0"), (7, 10, '#,##0"원"'), (10, 11, "#,##0"), (11, 12, '#,##0"원"')]:
             requests.append({"repeatCell": {"range": {"sheetId": dashboard_id, "startRowIndex": 3, "endRowIndex": max(15, len(months)+3),
                 "startColumnIndex": first, "endColumnIndex": last}, "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pattern}}}, "fields": "userEnteredFormat.numberFormat"}})
         requests.append({"repeatCell": {"range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": len(data)+1},
             "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP", "verticalAlignment": "TOP"}}, "fields": "userEnteredFormat.wrapStrategy,userEnteredFormat.verticalAlignment"}})
         for first, last, width in [(0, 1, 130), (1, 2, 110), (2, 3, 140), (3, 14, 95), (14, 16, 250), (16, 24, 130), (24, 28, 260)]:
             requests.append({"updateDimensionProperties": {"range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": first, "endIndex": last}, "properties": {"pixelSize": width}, "fields": "pixelSize"}})
-        requests.append({"updateDimensionProperties": {"range": {"sheetId": dashboard_id, "dimension": "COLUMNS", "startIndex": 3, "endIndex": 12}, "properties": {"pixelSize": 135}, "fields": "pixelSize"}})
+        for i, width in enumerate((160, 200, 20, 90, 55, 75, 75, 115, 110, 115, 90, 115)):
+            requests.append({"updateDimensionProperties": {"range": {"sheetId": dashboard_id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i+1}, "properties": {"pixelSize": width}, "fields": "pixelSize"}})
         self.call("POST", ":batchUpdate", json={"requests": requests})
         actual = self.values([f"'{SUMMARY_SHEET}'!A2:AB{max(2,len(data)+1)}", "'대시보드'!B4:B5", f"'BL별 작업 검산'!A8:M{max(8,len(check)+7)}", f"'대시보드'!D4:L{max(4,len(months)+3)}"])
         cost_total = "미확인" if data and report["totals"]["cost_missing"] == len(data) else decimal(report["totals"]["cost"])
