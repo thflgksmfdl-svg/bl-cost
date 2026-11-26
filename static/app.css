@@ -186,6 +186,13 @@ dialog::backdrop { background:var(--color-backdrop); }
 .invoice-breakdown>div { display:flex; gap:var(--space-xs); align-items:baseline; }
 .invoice-breakdown dt { color:var(--color-muted); font-size:var(--text-sm); }
 .invoice-breakdown dd { margin:0; color:var(--color-ink-2); font-size:var(--text-sm); font-variant-numeric:tabular-nums; }
+.cbm-details { margin-top:var(--space-md); font-size:var(--text-sm); }
+.cbm-details summary { width:fit-content; min-height:44px; padding-block:var(--space-sm); color:var(--color-accent-deep); font-weight:700; }
+.cbm-items { margin:var(--space-xs) 0; padding-left:var(--space-lg); }
+.cbm-items li { padding-block:var(--space-xs); line-height:1.75; }
+.cbm-items span { display:block; }
+.cbm-items span+span { color:var(--color-ink-2); font-variant-numeric:tabular-nums; }
+.cbm-rule { margin-top:var(--space-sm); color:var(--color-ink-2); line-height:1.8; font-variant-numeric:tabular-nums; }
 .invoice-tools { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:var(--space-md); margin-top:var(--space-lg); padding-top:var(--space-md); border-top:1px solid var(--color-rule); }
 .invoice-tools .invoice-actions { margin:0; }
 .message-preview { font-size:var(--text-sm); }

@@ -82,3 +82,10 @@ test('duplicate charge prompts are removed while information corrections remain 
   const visible=JSON.parse(r.run('JSON.stringify(correctionIssues('+JSON.stringify({review_issues:issues})+'))'));
   assert.deepEqual(visible.map(i=>i.text),['수량 확인','무료시간 확인','고객명 확인','입고방식 확인','추가 확인']);
 });
+
+test('box CBM retains all six decimal places and makes included fees explicit',()=>{
+  const r=setup(saved());
+  assert.equal(r.run('cbmQty("0.013468")'),'0.013468');
+  assert.match(r.run('volumeRule({ready:true,cbm_excess:"0.2",cbm_charge:"2200"})'),/초과 0.2 CBM.*2,200원.*VAT 포함.*자동 합산됨.*별도 추가금 입력 불필요/);
+  assert.equal(r.run('volumeRule({ready:false,error:"호수 확인 필요"})'),'호수 확인 필요');
+});

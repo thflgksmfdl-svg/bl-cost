@@ -248,7 +248,7 @@ class WorkflowTests(TestCase):
         self.assertContains(r,'data-app-root="/bl-cost"')
         self.assertContains(r,f'href="/bl-cost{static("app.css")}"')
         self.assertContains(r,f'src="/bl-cost{static("app.js")}"')
-        self.assertContains(r,"물류 작업 도구")
+        self.assertContains(r,"1688EASY 도구")
         data=self.client.get(f"/bl-cost/api/batches/{self.batch.id}/").json()
         self.assertEqual(data["bl"],self.batch.bl)
         self.assertContains(self.client.get("/"),'data-app-root=""')

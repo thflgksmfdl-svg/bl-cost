@@ -11,7 +11,7 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 from django.views.csrf import csrf_failure as csrf_failure_page
 
-from .domain import DataError, calculate, decimal, summarize, review_issues, invoice_message
+from .domain import DataError, calculate, decimal, summarize, review_issues, invoice_message, volume_issue
 from .models import Audit, Batch, ReportSnapshot
 from .reports import queue_reports
 from .sheets import Sheets
@@ -45,7 +45,7 @@ def serialized(batch, detail=False):
     if detail:
         decisions, completed, invoices = [], [], []
         for order in batch.orders:
-            o = {k:v for k,v in order.items() if k in {"id","customer","jungpan_order","shop_orders","trackings","mode","amount","memo","opp","boxes","extra_hours","extra_amount","reason","free_hours_override","reviewed"}}
+            o = {k:v for k,v in order.items() if k in {"id","customer","jungpan_order","shop_orders","trackings","mode","amount","memo","opp","boxes","cbm","box_volume","cbm_override","extra_hours","extra_amount","reason","free_hours_override","reviewed"}}
             issues = review_issues(order, batch.rules)
             c=calculate(order,batch.rules)
             o.update(review_issues=issues,calculation=c,
@@ -169,13 +169,20 @@ def edited_order(order, changes, require_reason=True):
                 raise DataError("입고방식을 선택해 주세요.")
             o[key] = value
         elif value is None or value == "":
+            if key == "cbm" and o.get("box_volume"):
+                raise DataError("확인한 CBM을 입력해 주세요. 빈 값으로 확정할 수 없습니다.")
             o[key] = None if key in ("opp", "boxes", "manual_total", "free_hours_override") else "0"
         else:
             n = decimal(value, maximum=Decimal("1000000") if key in ("opp", "boxes") else Decimal("1000000000"))
             if key in ("opp", "boxes") and n != n.to_integral_value():
                 raise DataError("포장재 수량은 정수로 입력해 주세요.")
             o[key] = int(n) if key in ("opp", "boxes") else str(n)
-    adjusted = (decimal(o["extra_hours"]) or decimal(o["extra_amount"]) or o["waive_work"] or o["waive_total"]
+    if o.get("box_volume"):
+        if o.get("boxes") != order.get("boxes"):
+            o["cbm_override"] = False
+        if "cbm" in changes:
+            o["cbm_override"] = bool(o.get("cbm_override") or volume_issue(o) or decimal(o["cbm"]) != decimal(order.get("cbm") or 0))
+    adjusted = (decimal(o["extra_hours"]) or decimal(o["extra_amount"]) or o["waive_work"] or o["waive_total"] or o.get("cbm_override")
                 or o["manual_total"] is not None or o["free_hours_override"] is not None)
     if require_reason and adjusted and not o["reason"]:
         raise DataError("추가 청구·면제·직접 입력의 사유를 적어 주세요.")
@@ -211,8 +218,9 @@ def batch_action(request, pk, action):
                 for o in batch.orders:
                     if o["id"] == order_id:
                         edited = edited_order(o, data.get("changes", {}))
-                        if edited["reviewed"] and not calculate(edited,batch.rules)["ready"]:
-                            raise DataError("고객명·입고방식·계산 기준을 확인해 주세요.")
+                        calculation = calculate(edited, batch.rules)
+                        if edited["reviewed"] and not calculation["ready"]:
+                            raise DataError(calculation.get("error") or "고객명·입고방식·계산 기준을 확인해 주세요.")
                         new.append(edited)
                         found = True
                     else:

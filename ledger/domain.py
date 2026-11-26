@@ -4,6 +4,8 @@ import re
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 
 WORK_TYPES = ("바코드", "스티커", "재봉", "벌크작업", "인쇄스티커", "도장", "작업시간", "작업필요없음")
+BOX_DIMENSIONS = {1: (30, 20, 20), 2: (37, 14, 26), 3: (43, 21, 27), 4: (40, 30, 30),
+                  5: (53, 29, 37), 6: (50, 40, 40), 7: (60, 40, 50), 8: (68, 40, 17)}
 
 
 class DataError(ValueError):
@@ -38,13 +40,15 @@ def review_issues(order, rules):
     issues = []
     def add(kind, text, action):
         issues.append({"kind": kind, "text": text, "action": action})
+    if volume_issue(order):
+        add("cbm", volume_issue(order), "원문과 실제 박스 규격·수량을 확인하고 박스 실사용량과 적용 CBM을 입력해 주세요.")
     if order.get("opp"):
         add("opp", f"opp 봉투 {order['opp']}개 사용", "추가 청구할 시간 또는 금액을 정하세요. 추가하지 않으면 두 항목을 0으로 두세요.")
     if re.search(r"비용|청구|받아야|유료|추가\s*(?:금액|요금|작업비)", memo):
         add("cost", "입고오류메시지에 별도 비용 안내가 있습니다", "원문의 비용을 추가 청구시간 또는 별도 추가금액에 반영하세요. 이미 기본 청구에 포함됐다면 0으로 두세요.")
     instructions = re.search(r"해주세요|해\s*주세요|사용\s*예정|요청사항", memo)
     if not instructions and re.search(r"사용|소모", memo) and re.search(r"opp|봉투|박스|뽁뽁이|뾱뾱이", memo, re.I):
-        missing = (re.search(r"opp|봉투", memo, re.I) and order.get("opp") is None) or ("박스" in memo and order.get("boxes") is None)
+        missing = (re.search(r"opp|봉투", memo, re.I) and order.get("opp") is None) or ("박스" in memo and order.get("boxes") is None and not order.get("box_volume"))
         if missing:
             add("quantity", "메모의 포장재 사용량을 확정하지 못했습니다", "입고오류메시지의 실제 사용량을 확인해 수량을 입력한 뒤 추가 청구 여부를 정하세요.")
     for warning in order.get("warnings", []):
@@ -72,17 +76,95 @@ def first_work(text):
     return result
 
 
+def box_volume(memo):
+    sizes = list(re.finditer(r"(?<![\d.])(-?\d+(?:\.\d+)?)\s*호(?:\s*박스)?", memo))
+    if not sizes:
+        return None
+    out = {"items": [], "boxes": None, "cbm": None, "error": ""}
+    try:
+        if re.search(r"요청사항|해주세요|해\s*주세요|사용\s*예정|취소|수정|추가", memo):
+            raise DataError("박스 규격 메모에 예정·수정 표현이 있어 실제 CBM 확인이 필요합니다.")
+        spans, seen, used_until = [], set(), 0
+        for match in sizes:
+            raw_size = match.group(1)
+            if len(raw_size) > 2 or int(raw_size) not in BOX_DIMENSIONS:
+                raise DataError("1~8호 이외의 박스 규격이 있어 CBM을 계산하지 못했습니다.")
+            size = int(raw_size)
+            if size in seen:
+                raise DataError("같은 박스 호수가 반복되어 실제 수량과 CBM 확인이 필요합니다.")
+            left = re.search(r"(?<![\d.,-])(\d+)\s*개\s*$", memo[:match.start()])
+            if left and left.start() < used_until:
+                left = None
+            right = re.match(r"\s*(?:[:：xX×*]\s*)?(\d+)\s*개", memo[match.end():])
+            if bool(left) == bool(right):
+                raise DataError("박스 호수별 수량을 확정하지 못해 CBM 확인이 필요합니다.")
+            raw_count = (left or right).group(1)
+            if len(raw_count) > 7 or int(raw_count) > 1000000:
+                raise DataError("박스 수량이 허용 범위를 벗어났습니다.")
+            count, dimensions = int(raw_count), BOX_DIMENSIONS[size]
+            unit = Decimal(dimensions[0] * dimensions[1] * dimensions[2]) / 1000000
+            out["items"].append({"size": size, "count": count, "dimensions": list(dimensions),
+                                 "unit_cbm": format(unit, "f"), "cbm": format(unit * count, "f")})
+            start = left.start() if left else match.start()
+            used_until = match.end() + (right.end() if right else 0)
+            spans.append((start, used_until))
+            seen.add(size)
+        remainder = list(memo)
+        for start, end in spans:
+            remainder[start:end] = " " * (end - start)
+        remainder = "".join(remainder)
+        summaries = list(re.finditer(r"(?:총|합계|전체|[:：])\s*(\d+)\s*(?:개\s*)?박스", remainder))
+        raw_totals = [m.group(1) for m in summaries]
+        if any(len(n) > 7 or int(n) > 1000000 for n in raw_totals):
+            raise DataError("총 박스 수량이 허용 범위를 벗어났습니다.")
+        totals = {int(n) for n in raw_totals}
+        boxes = sum(i["count"] for i in out["items"])
+        if totals and totals != {boxes}:
+            raise DataError("호수별 수량 합계와 메모의 총 박스 수가 달라 CBM 확인이 필요합니다.")
+        rest = list(remainder)
+        for summary in summaries:
+            rest[summary.start():summary.end()] = " " * (summary.end() - summary.start())
+        rest = "".join(rest)
+        if "박스" in rest or re.search(r"\S+\s*호", rest):
+            raise DataError("규격을 알 수 없는 박스가 함께 적혀 있어 CBM 확인이 필요합니다.")
+        out.update(boxes=boxes, cbm=format(sum((Decimal(i["cbm"]) for i in out["items"]), Decimal(0)), "f"))
+    except DataError as e:
+        out["error"] = str(e)
+    return out
+
+
+def volume_issue(order):
+    volume = order.get("box_volume")
+    if not volume:
+        return ""
+    if order.get("boxes") is None:
+        return volume["error"] or "CBM 계산을 위해 실제 박스 수량 확인이 필요합니다."
+    if order.get("cbm_override") and decimal(order["boxes"]) and not decimal(order.get("cbm") or 0):
+        return "박스 실사용량이 있으면 0보다 큰 CBM을 입력해 주세요."
+    if order.get("cbm_override"):
+        return ""
+    if volume["error"]:
+        return volume["error"]
+    if decimal(order["boxes"]) != decimal(volume["boxes"]):
+        return "박스 수량이 규격 메모와 달라 적용 CBM을 다시 확인해야 합니다."
+    return ""
+
+
 def packaging(memo):
     # shortcut: 사용량이 분명한 한국어 메모만 자동 추출, 다른 표현은 원문을 보고 검토한다.
-    out = {"opp": None, "boxes": None}
+    out = {"opp": None, "boxes": None, "box_volume": box_volume(memo)}
     if re.search(r"요청사항|해주세요|해 주세요|사용\s*예정|취소|수정|추가", memo):
         return out
     kinds = {"opp": r"OPP\s*(?:봉투)?", "boxes": r"박스"}
     for key, word in kinds.items():
+        if key == "boxes" and out["box_volume"]:
+            continue
         patterns = [rf"(\d+)\s*(?:개\s*)?{word}\s*(?:사용)?", rf"{word}\s*(?:사용)?\s*(\d+)\s*(?:개)?"]
         values = [int(m.group(1)) for pat in patterns for m in re.finditer(pat, memo, re.I)]
         if values and len(set(values)) == 1:
             out[key] = values[0]
+    if out["box_volume"] and not out["box_volume"]["error"]:
+        out["boxes"] = out["box_volume"]["boxes"]
     return out
 
 
@@ -117,7 +199,8 @@ def assemble(source):
                 "customer": child.get("recipient", ""), "member": child.get("member", ""), "mode": mode,
                 "amount": str(decimal(child["amount"])), "work": {}, "products": [], "memo": memo,
                 "admin_memo": child.get("admin_memo", ""),
-                "opp": pack["opp"], "boxes": pack["boxes"], "cbm": "0", "warnings": [],
+                "opp": pack["opp"], "boxes": pack["boxes"], "cbm": (pack["box_volume"] or {}).get("cbm", "0"),
+                "box_volume": pack["box_volume"], "warnings": [],
                 "review_required": False, "reviewed": False,
                 "extra_hours": "0", "extra_amount": "0", "reason": "", "waive_work": False,
                 "waive_total": False, "manual_total": None, "free_hours_override": None}
@@ -151,6 +234,8 @@ def assemble(source):
 def calculate(order, rules):
     if not rules:
         return {"ready": False, "error": "구글시트 청구규칙·원가표·월별 환율을 연결해 주세요."}
+    if volume_issue(order):
+        return {"ready": False, "error": volume_issue(order)}
     try:
         rate = decimal(rules["exchange"])
         if not rate or order["mode"] not in ("직접수령", "로켓그로스"):
@@ -175,7 +260,9 @@ def calculate(order, rules):
         boxes = decimal(order.get("boxes") or 0)
         excess = max(Decimal("0"), boxes - decimal(rules["free_boxes"]))
         box_charge = (excess * decimal(rules["box_cny"]) * rate * (1 + vat)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-        cbm_charge = (max(Decimal("0"), decimal(order.get("cbm", "0")) - Decimal("3")) * Decimal("10000") * (1 + vat)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        cbm = decimal(order.get("cbm", "0"))
+        cbm_excess = max(Decimal("0"), cbm - Decimal("3"))
+        cbm_charge = (cbm_excess * Decimal("10000") * (1 + vat)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         base = work + box_charge + cbm_charge
         total = base + extra_time + extra_amount
         if order.get("manual_total") is not None:
@@ -192,7 +279,7 @@ def calculate(order, rules):
         cost += decimal(order.get("cbm", "0")) * decimal(unit_costs["cbm_cny"]) * rate
         return {"ready": True, "actual_hours": str(actual), "free_hours": str(free), "charge_hours": str(charge_hours),
                 "work_charge": str(work), "extra_time_charge": str(extra_time), "box_excess": str(excess),
-                "box_charge": str(box_charge), "cbm_charge": str(cbm_charge), "base": str(base),
+                "box_charge": str(box_charge), "cbm": str(cbm), "cbm_excess": str(cbm_excess), "cbm_charge": str(cbm_charge), "base": str(base),
                 "extra_amount": str(extra_amount), "total": str(total), "cost": str(cost.quantize(Decimal("1"), rounding=ROUND_HALF_UP)),
                 "margin": str((total - cost).quantize(Decimal("1"), rounding=ROUND_HALF_UP))}
     except (DataError, KeyError, IndexError):
@@ -225,7 +312,7 @@ def invoice_message(order, rules):
     if decimal(c["box_charge"]):
         lines.append(f"- 박스 초과 사용 청구: {decimal(c['box_charge']):,.0f}원")
     if decimal(c["cbm_charge"]):
-        lines.append(f"- CBM {q(order['cbm'])} / 초과 {q(max(Decimal(0),decimal(order['cbm'])-3))}CBM 청구: {decimal(c['cbm_charge']):,.0f}원")
+        lines.append(f"- CBM {q(order['cbm'])} / 초과 {q(max(Decimal(0),decimal(order['cbm'])-3))}CBM 청구: {decimal(c['cbm_charge']):,.0f}원 (VAT 포함)")
     if decimal(order["extra_hours"]):
         lines.append(f"- 별도 추가 청구시간 {q(order['extra_hours'])}시간: {decimal(c['extra_time_charge']):,.0f}원")
     if decimal(order["extra_amount"]):
